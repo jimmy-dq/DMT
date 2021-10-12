@@ -70,19 +70,42 @@ class EXPL_BAT(base_model.BaseModel):
 
         loss_seg = F.binary_cross_entropy_with_logits(estimation_cla, seg_label)
 
-        loss_box = F.smooth_l1_loss(estimation_boxes[:, :, :4],
-                                    box_label[:, None, :4].expand_as(estimation_boxes[:, :, :4]),
-                                    reduction='none')
-        loss_box = torch.mean(loss_box.mean(2))
+        # box loss
+        batch_size = box_label.size()[0]
+        k_num = estimation_boxes.size()[0] // batch_size
+        # loss_verification = 0
+        for i in range(k_num): # also should include the previous_xyz batch (batch samples)
+            if i == 0:
+                loss_box = F.smooth_l1_loss(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4],
+                                            box_label[:, None, :4].expand_as(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4]),
+                                            reduction='none')
+            else:
+                loss_box += F.smooth_l1_loss(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4],
+                                            box_label[:, None, :4].expand_as(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4]),
+                                            reduction='none')
+            # if i < k_num -1:
+            #     if i < (k_num-1)//2:
+            #         loss_verification += F.binary_cross_entropy_with_logits(
+            #             output['verification_scores'].squeeze(-1)[(i * batch_size):(i * batch_size + batch_size), :],
+            #             torch.ones(batch_size, 1).cuda())
+            #     else:
+            #         loss_verification += F.binary_cross_entropy_with_logits(
+            #             output['verification_scores'].squeeze(-1)[(i * batch_size):(i * batch_size + batch_size), :],
+            #             torch.zeros(batch_size, 1).cuda())
 
-        # dist = torch.sum((data['previous_center'].unsqueeze(1) - box_label[:, None, :3]) ** 2, dim=-1)
-        #
+
+
+        loss_box = torch.mean(loss_box.mean(2))
+        # loss_verification /= k_num
+
+        # dist = torch.sum((estimation_boxes[:, :, :3] - box_label[:, None, :3]) ** 2, dim=-1)
+
         # dist = torch.sqrt(dist + 1e-6)  # B, K
         # objectness_label = torch.zeros_like(dist, dtype=torch.float)
-        # objectness_label[dist < 0.3] = 1
+        # objectness_label[dist < 0.2] = 1
         # objectness_score = estimation_boxes[:, :, 4]  # B, K
         # objectness_mask = torch.zeros_like(objectness_label, dtype=torch.float)
-        # objectness_mask[dist < 0.3] = 1
+        # objectness_mask[dist < 0.2] = 1
         # objectness_mask[dist > 0.6] = 1
         # loss_objective = F.binary_cross_entropy_with_logits(objectness_score, objectness_label,
         #                                                     pos_weight=torch.tensor([2.0]).cuda())
@@ -96,10 +119,16 @@ class EXPL_BAT(base_model.BaseModel):
         # loss_bc = F.smooth_l1_loss(pred_search_bc, search_bc, reduction='none')
         # loss_bc = torch.mean(loss_bc.mean(2))
         # "loss_objective": loss_objective,
-        return {"loss_seg": loss_seg,
+        return {
+                "loss_seg": loss_seg,
                 "loss_bc": loss_bc,
                 "loss_box": loss_box
                }
+        #"loss_objective": loss_objective,
+    # ,
+    #                 "loss_verification": loss_verification
+    # ,
+    # "loss_verification": loss_verification
 
 
     def forward(self, input_dict):
@@ -123,6 +152,8 @@ class EXPL_BAT(base_model.BaseModel):
         M = template.shape[1]
         N = search.shape[1]
 
+        samples = input_dict['samples'] #training: batchx8x3
+
         if template.shape[0]>1:
             dist = input_dict['dist']
 
@@ -143,7 +174,11 @@ class EXPL_BAT(base_model.BaseModel):
         fusion_feature = self.xcorr(template_feature, search_feature, template_xyz, search_xyz, template_bc,
                                     pred_search_bc)
         previous_xyz = input_dict['previous_center'].unsqueeze(1)  # Nx1x3
-        estimation_boxes, estimation_cla = self.rpn(search_xyz, fusion_feature, previous_xyz)
+        if samples == None:
+            estimation_boxes, estimation_cla = self.rpn(search_xyz, fusion_feature, previous_xyz, template_xyz, template_feature, samples=samples)
+        else:
+            estimation_boxes, estimation_cla, verification_scores = self.rpn(search_xyz, fusion_feature, previous_xyz, template_xyz,
+                                                        template_feature, samples=samples)
 
 
         # '''
@@ -175,7 +210,8 @@ class EXPL_BAT(base_model.BaseModel):
         end_points = {"estimation_boxes": estimation_boxes,
                       "pred_search_bc": pred_search_bc,
                       'estimation_cla': estimation_cla,
-                      'sample_idxs': sample_idxs
+                      'sample_idxs': sample_idxs,
+                      'verification_scores': verification_scores if samples != None else None
                       }
         return end_points
 
@@ -190,6 +226,7 @@ class EXPL_BAT(base_model.BaseModel):
                   "pred_search_bc": pred_search_bc
         }
         """
+
         end_points = self(batch)
 
         search_pc = batch['points2cc_dist_s']
@@ -205,12 +242,15 @@ class EXPL_BAT(base_model.BaseModel):
         # compute loss
         loss_dict = self.compute_loss(batch, end_points)
 
-        loss = loss_dict['loss_box'] * self.config.box_weight \
+        loss =  loss_dict['loss_box'] * self.config.box_weight \
                + loss_dict['loss_seg'] * self.config.seg_weight \
                + loss_dict['loss_bc'] * self.config.bc_weight
 
         #loss_dict['loss_objective'] * self.config.objectiveness_weight \
-               # +
+               # + \
+        #                + loss_dict['loss_verification'] * self.config.verification_weight
+        # \
+        # + loss_dict['loss_verification'] * self.config.verification_weight
 
         # log
         self.log('loss/train', loss.item(), on_step=True, on_epoch=True, prog_bar=True, logger=False)
@@ -218,12 +258,16 @@ class EXPL_BAT(base_model.BaseModel):
                  logger=False)
         self.log('loss_seg/train', loss_dict['loss_seg'].item(), on_step=True, on_epoch=True, prog_bar=True,
                  logger=False)
+        # self.log('loss_ver/train', loss_dict['loss_verification'].item(), on_step=True, on_epoch=True, prog_bar=True,
+        #          logger=False)
         # self.log('loss_vote/train', loss_dict['loss_vote'].item(), on_step=True, on_epoch=True, prog_bar=True,
         #          logger=False)
         self.log('loss_bc/train', loss_dict['loss_bc'].item(), on_step=True, on_epoch=True, prog_bar=True,
                  logger=False)
         # self.log('loss_objective/train', loss_dict['loss_objective'].item(), on_step=True, on_epoch=True, prog_bar=True,
         #          logger=False)
+        # ,
+        # 'loss_ver': loss_dict['loss_verification'].item()
 
         self.logger.experiment.add_scalars('loss', {'loss_total': loss.item(),
                                                     'loss_box': loss_dict['loss_box'].item(),
@@ -231,5 +275,7 @@ class EXPL_BAT(base_model.BaseModel):
                                                     'loss_seg': loss_dict['loss_seg'].item()},
                                            global_step=self.global_step)
         #      'loss_objective': loss_dict['loss_objective'].item()
+        # ,
+        #                                                     'loss_ver': loss_dict['loss_verification'].item()
 
         return loss

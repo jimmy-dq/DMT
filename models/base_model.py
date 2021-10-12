@@ -196,25 +196,50 @@ class BaseModel(pl.LightningModule):
                 # previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1])
                 # previous_center = previous_center.points.transpose(1, 0)
                 # data_dict['previous_center'] = torch.from_numpy(previous_center).float().cuda()  # 1x3
+                # data_dict['samples'] = None
+
                 if frame_id == 1:
                     previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1])
                     previous_center = previous_center.points.transpose(1, 0)
                     data_dict['previous_center'] = torch.from_numpy(previous_center).float().cuda() # 1x3
+                    data_dict['samples'] = None
                 else:
                     previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1])
                     bef_previous_center = points_utils.generate_single_pc(results_bbs[-2].center.reshape(3, 1), results_bbs[-1])
-                    est_cur_center = previous_center.points - bef_previous_center.points + previous_center.points
-                    est_cur_center = est_cur_center.transpose(1, 0)
+                    velocity = previous_center.points - bef_previous_center.points
+                #     velocities = points_utils.generate_random_points(velocity, 1.5, 32)
+                    est_cur_centers = velocity + previous_center.points
+                    est_cur_centers = est_cur_centers.transpose(1, 0)
+                    data_dict['previous_center'] = torch.from_numpy(est_cur_centers).float().cuda()
+                    data_dict['samples'] = None
+                #
+                #     # print('frame: %d prev-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-previous_center.points.transpose(1, 0))**2))))
+                #     # print('frame: %d esst-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-est_cur_center)**2))))
+                #
                     # data_dict['previous_center'] = torch.from_numpy(previous_center).float().cuda()  # 1x3
-                    data_dict['previous_center'] = torch.from_numpy(est_cur_center).float().cuda()  # 1x3
-                    print('frame: %d prev-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-previous_center.points.transpose(1, 0))**2))))
-                    print('frame: %d esst-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-est_cur_center)**2))))
-
-
-                # BAT forward
+                #     for p_iondex in range(est_cur_centers.shape[0]):
+                #         data_dict['previous_center'] = torch.from_numpy(est_cur_centers[p_iondex].reshape(1,3)).float().cuda()  # 1x3
+                #         end_points = self(data_dict)
+                #         estimation_box = end_points['estimation_boxes']
+                #         estimation_box_cpu = estimation_box.squeeze(0).detach().cpu().numpy()
+                #         candidate_box = points_utils.getOffsetBB(ref_bb, estimation_box_cpu.reshape(4), degrees=self.config.degrees,
+                #                                  use_z=self.config.use_z,
+                #                                  limit_box=self.config.limit_box)
+                #         candidate_overlap = estimateOverlap(candidate_box, results_bbs[-1], dim=self.config.IoU_space,
+                #                                        up_axis=self.config.up_axis)
+                #         temp_overlap = torch.zeros(1,1)
+                #         temp_overlap[0] = candidate_overlap
+                #         if p_iondex == 0:
+                #             estimation_boxes_gpu = torch.cat((estimation_box.squeeze(0), temp_overlap.cuda()), dim=1)
+                #         else:
+                #             estimation_boxes_gpu = torch.cat((estimation_boxes_gpu, torch.cat((estimation_box.squeeze(0), temp_overlap.cuda()), dim=1)), dim=0)
+                #     estimation_boxes_cpu = estimation_boxes_gpu.detach().cpu().numpy()
+                        # BAT forward
+                # if frame_id <=1:
                 end_points = self(data_dict)
                 estimation_box = end_points['estimation_boxes']
                 estimation_boxes_cpu = estimation_box.squeeze(0).detach().cpu().numpy()
+
                 if estimation_boxes_cpu.shape[1] == 4:
                     estimation_box_cpu = estimation_boxes_cpu[0, 0:4]
                 else:
