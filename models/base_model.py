@@ -11,6 +11,89 @@ from utils.metrics import TorchSuccess, TorchPrecision
 from utils.metrics import estimateOverlap, estimateAccuracy
 import torch.nn.functional as F
 import numpy as np
+from sklearn import *
+from sklearn.preprocessing import PolynomialFeatures
+
+
+
+# class LSTM(torch.nn.Module):
+#
+#     def __init__(self, num_classes, input_size, hidden_size, num_layers, seq_length):
+#         super(LSTM, self).__init__()
+#
+#         self.num_classes = num_classes
+#         self.num_layers = num_layers
+#         self.input_size = input_size
+#         self.hidden_size = hidden_size
+#         self.seq_length = seq_length
+#
+#         self.lstm = torch.nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+#                             num_layers=num_layers, batch_first=True)
+#
+#         self.fc = torch.nn.Linear(hidden_size, num_classes)
+#
+#     def forward(self, x):
+#         # h_0 = torch.zeros(
+#         #     self.num_layers, x.size(0), self.hidden_size).cuda()
+#         #
+#         # c_0 = torch.zeros(
+#         #     self.num_layers, x.size(0), self.hidden_size).cuda()
+#
+#         # Propagate input through LSTM
+#         # ula, (h_out, _) = self.lstm(x, (h_0, c_0))
+#         output, status = self.lstm(x) # batchXD
+#         output = output[:,-1,:]
+#
+#         # h_out = h_out.view(-1, self.hidden_size)
+#
+#         # out = self.fc(h_out)
+#         out = self.fc(output)
+#
+#         return out
+
+
+# lstm = LSTM(3, 3, 6, 4, 10)
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_19998.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_199998.pt'))
+# lstm = lstm.cuda()
+# lstm.eval()
+
+
+
+class LSTM(torch.nn.Module):
+    def __init__(self, input_size=1, hidden_layer_size=100, output_size=1, num_layers=1):
+        super().__init__()
+        self.hidden_layer_size = hidden_layer_size
+
+        self.lstm = torch.nn.LSTM(input_size, hidden_layer_size, batch_first=True)
+
+        self.linear = torch.nn.Linear(hidden_layer_size*10, output_size)
+
+        self.num_layers = num_layers
+
+        # self.hidden_cell = (torch.zeros(1,1,self.hidden_layer_size),
+        #                     torch.zeros(1,1,self.hidden_layer_size))
+
+    def forward(self, input_seq):
+        h_0 = torch.zeros(
+            self.num_layers, input_seq.size(0), self.hidden_layer_size).cuda()
+
+        c_0 = torch.zeros(
+            self.num_layers, input_seq.size(0), self.hidden_layer_size).cuda()
+
+        # lstm_out, self.hidden_cell = self.lstm(input_seq, self.hidden_cell)
+        lstm_out, self.hidden_cell = self.lstm(input_seq, (h_0, c_0))
+        predictions = self.linear(lstm_out.reshape(len(input_seq), -1))
+        return predictions #[-1]
+
+
+lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3)
+lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_normalize_position_7999.pt'))
+lstm = lstm.cuda()
+lstm.eval()
+print('loading the lstm model')
+
+
 
 
 class BaseModel(pl.LightningModule):
@@ -23,6 +106,8 @@ class BaseModel(pl.LightningModule):
         # testing metrics
         self.prec = TorchPrecision()
         self.success = TorchSuccess()
+
+
 
     def configure_optimizers(self):
         if self.config.optimizer.lower() == 'sgd':
@@ -154,6 +239,59 @@ class BaseModel(pl.LightningModule):
         }
         return data_dict
 
+    def get_past_avarage_velocity(self, results_bbs, frame_num=2, average_velocity_model = False, linear_regression = False,
+                                  polynomial_regression = False, ridge_regression = False, lstm_regression = False):
+        frame_num = min(len(results_bbs), frame_num)
+        pre_locations = []
+        velocity = []
+        results_bbs_temp = results_bbs[(len(results_bbs)-frame_num):]
+        for i in range(len(results_bbs_temp)):
+            rel_location = points_utils.generate_single_pc(results_bbs_temp[i].center.reshape(3, 1), results_bbs_temp[-1])
+            pre_locations.append(rel_location.points) #3x1
+        if average_velocity_model:
+            # if frame==2, it's the constant velocity model
+            for i in range(1, len(pre_locations)):
+                velocity.append(pre_locations[i] - pre_locations[i-1])
+            mean_velocity = np.mean(np.array(velocity), axis=0)
+            predicted_location = mean_velocity
+
+        if linear_regression:
+            ols = linear_model.LinearRegression()
+            times_steps = np.array([i for i in range(len(results_bbs_temp))]).reshape(len(results_bbs_temp), 1)
+            pre_locations = np.array(pre_locations).squeeze()
+            ols.fit(times_steps, pre_locations)
+            predicted_location = ols.predict(np.array([[pre_locations.shape[0]]])) #1x3
+            predicted_location = predicted_location.transpose(1, 0)
+
+        if polynomial_regression:
+            times_steps = np.array([i for i in range(len(results_bbs_temp))]).reshape(len(results_bbs_temp), 1)
+            poly = PolynomialFeatures(degree=2)
+            poly.fit(times_steps)
+            inputs = poly.transform(times_steps)
+            pre_locations = np.array(pre_locations).squeeze()
+            ols = linear_model.LinearRegression()
+            ols.fit(inputs, pre_locations)
+
+            testing = np.array([[pre_locations.shape[0]]])
+            poly.fit(testing)
+            testing = poly.transform(testing)
+
+            predicted_location = ols.predict(testing)
+            predicted_location = predicted_location.transpose(1, 0)
+
+        if ridge_regression:
+            ols = linear_model.RidgeCV(alphas=np.logspace(-5, 15, 30), cv=2)
+            times_steps = np.array([i for i in range(len(results_bbs_temp))]).reshape(len(results_bbs_temp), 1)
+            pre_locations = np.array(pre_locations).squeeze()
+            ols.fit(times_steps, pre_locations)
+            predicted_location = ols.predict(np.array([[pre_locations.shape[0]]]))  # 1x3
+            predicted_location = predicted_location.transpose(1, 0)
+
+
+
+        return predicted_location
+
+
     def evaluate_one_sequence(self, sequence):
         """
 
@@ -164,6 +302,7 @@ class BaseModel(pl.LightningModule):
         distances = []
         results_bbs = []
         dist_gt = []
+        gt_bbs = []
         for frame_id in range(len(sequence)):
             if frame_id > 0:
                 dist_gt.append(np.sqrt(np.sum((sequence[frame_id]["3d_bbox"].center - sequence[frame_id-1]["3d_bbox"].center)**2)))
@@ -175,6 +314,7 @@ class BaseModel(pl.LightningModule):
             if frame_id == 0:
                 # the first frame
                 results_bbs.append(this_bb)
+                gt_bbs.append(this_bb)
             else:
 
                 # preparing search area
@@ -204,14 +344,39 @@ class BaseModel(pl.LightningModule):
                     data_dict['previous_center'] = torch.from_numpy(previous_center).float().cuda() # 1x3
                     data_dict['samples'] = None
                 else:
-                    previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1])
-                    bef_previous_center = points_utils.generate_single_pc(results_bbs[-2].center.reshape(3, 1), results_bbs[-1])
-                    velocity = previous_center.points - bef_previous_center.points
-                #     velocities = points_utils.generate_random_points(velocity, 1.5, 32)
-                    est_cur_centers = velocity + previous_center.points
-                    est_cur_centers = est_cur_centers.transpose(1, 0)
-                    data_dict['previous_center'] = torch.from_numpy(est_cur_centers).float().cuda()
-                    data_dict['samples'] = None
+                    if frame_id < 10: # 10 is the seq_len for velocity, i.e., at least have (seq_len+1) frames, except for the current frame
+                        previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1]) # 3x1
+                        bef_previous_center = points_utils.generate_single_pc(results_bbs[-2].center.reshape(3, 1), results_bbs[-1]) # 3x1
+                        velocity = previous_center.points - bef_previous_center.points
+
+                        est_cur_centers = velocity + previous_center.points
+                        est_cur_centers = est_cur_centers.transpose(1, 0)
+                        data_dict['previous_center'] = torch.from_numpy(est_cur_centers).float().cuda()
+                        data_dict['samples'] = None
+                    else:
+                        pre_locations = []
+                        results_bbs_temp = results_bbs[(len(results_bbs) - 10):]
+                        for i in range(len(results_bbs_temp)):
+                            rel_location = points_utils.generate_single_pc(results_bbs_temp[i].center.reshape(3, 1),
+                                                                           results_bbs_temp[-1])
+                            pre_locations.append(rel_location.points)  # 3x1
+                        location_input = torch.from_numpy(np.array(pre_locations)).squeeze().unsqueeze(0).cuda()
+                        est_cur_centers = lstm(location_input.float()).cpu().data.numpy().reshape(3, 1)
+
+                        # # frame_location_list = gt_bbs[(len(gt_bbs)-10-1):]
+                        # velocity_list = [frame_location_list[j].center - frame_location_list[j - 1].center for j in range(1, len(frame_location_list))]
+                        # velocity_input = torch.from_numpy(np.array(velocity_list)).unsqueeze(0).cuda()
+                        # velocity = lstm(velocity_input.float()).cpu().data.numpy().reshape(3, 1)
+                        # predicted_location = results_bbs[-1].center.reshape(3, 1) + velocity
+                        # # predicted_location = gt_bbs[-1].center.reshape(3, 1) + velocity
+
+                        # est_cur_centers = points_utils.generate_single_pc(predicted_location, results_bbs[-1]) # 3x1
+                        # est_cur_centers = points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]) # 3x1
+                        est_cur_centers = est_cur_centers.transpose(1, 0) # 1x3
+                        data_dict['previous_center'] = torch.from_numpy(est_cur_centers).float().cuda()
+                        data_dict['samples'] = None
+
+
                 #
                 #     # print('frame: %d prev-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-previous_center.points.transpose(1, 0))**2))))
                 #     # print('frame: %d esst-to-gt: %f' %(frame_id, np.sqrt(np.sum((points_utils.generate_single_pc(this_bb.center.reshape(3, 1), results_bbs[-1]).points.transpose(1, 0)-est_cur_center)**2))))
@@ -250,6 +415,7 @@ class BaseModel(pl.LightningModule):
                                                          use_z=self.config.use_z,
                                                          limit_box=self.config.limit_box)
                 results_bbs.append(candidate_box)
+                gt_bbs.append(this_bb)
             # if np.isnan(results_bbs[-1].center).sum() == 0 and np.isinf(results_bbs[-1].center).sum() == 0:
             this_overlap = estimateOverlap(this_bb, results_bbs[-1], dim=self.config.IoU_space, up_axis=self.config.up_axis)
             this_accuracy = estimateAccuracy(this_bb, results_bbs[-1], dim=self.config.IoU_space, up_axis=self.config.up_axis)
