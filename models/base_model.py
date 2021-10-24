@@ -88,7 +88,7 @@ class LSTM(torch.nn.Module):
 
 
 lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3)
-lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_normalize_position_7999.pt'))
+lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/car_model_normalize_position_7999.pt'))
 lstm = lstm.cuda()
 lstm.eval()
 print('loading the lstm model')
