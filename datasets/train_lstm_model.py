@@ -126,4 +126,4 @@ for epoch in range(num_epochs):
         print("Epoch: %d, training loss: %1.5f val loss: %1.5f test loss: %1.5f" % (epoch, loss.item(), val_loss.item(), test_loss.item()))
 
         lstm = lstm.train()
-torch.save(lstm.state_dict(), './BAT/lstm_models/car_model_normalize_position_'+str(epoch)+'.pt')
+torch.save(lstm.state_dict(), './car_model_normalize_position_'+str(epoch)+'.pt')
