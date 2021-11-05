@@ -23,10 +23,12 @@ def sliding_window(data, seq_length):   # data: N * 3
         y.append(y_temp)
     return np.array(x), np.array(y) # x: N x seq_length x 3; y: N x 3;
 
-path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_train_velodyne_-1.dat'
-# path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_test_velodyne_-1.dat'
-seq_length = 10
-frame_window = 10
+# for training tracklet generation
+# path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_train_velodyne_-1.dat'
+# for testing tracklet generation
+path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_test_velodyne_-1.dat'
+seq_length = 5
+frame_window = 5
 with open(path, 'rb') as f:
     training_seqs = pickle.load(f)
 count_seq = 0
@@ -49,11 +51,11 @@ for v_index in range(len(training_seqs)):
         count_seq += 1
 print(trainX.size())
 print(trainY.size())
-torch.save(trainX, 'kitti_car_train_x_10_normalize_pos.pt')
-torch.save(trainY, 'kitti_car_train_label_10_normalize_pos.pt')
+# torch.save(trainX, 'kitti_car_train_x_' + str(seq_length) + '_normalize_pos.pt')
+# torch.save(trainY, 'kitti_car_train_label_'+ str(seq_length) +'_normalize_pos.pt')
 
 # for the testing data generation
-torch.save(trainX, 'kitti_car_test_x_10_normalize_pos.pt')
-torch.save(trainY, 'kitti_car_test_label_10_normalize_pos.pt')
+torch.save(trainX, 'kitti_car_test_x_' + str(seq_length) + '_normalize_pos.pt')
+torch.save(trainY, 'kitti_car_test_label_'+ str(seq_length) +'_normalize_pos.pt')
 
 

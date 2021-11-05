@@ -305,3 +305,45 @@ def get_in_box_mask(PC, box):
     close = np.logical_and(close, z_filt_max)
     return close
 
+
+'''
+written by Jimmy Wu
+Nov. 02
+'''
+def get_in_box_mask_from_numpy(PC, box):
+    """check which points of PC are inside the box"""
+    box_tmp = copy.deepcopy(box)
+    new_PC = PointCloud(PC.copy())
+    rot_mat = np.transpose(box_tmp.rotation_matrix)
+    trans = -box_tmp.center
+
+    # align data
+    new_PC.translate(trans)
+    box_tmp.translate(trans)
+    new_PC.rotate(rot_mat)
+    box_tmp.rotate(Quaternion(matrix=rot_mat))
+    maxi = np.max(box_tmp.corners(), 1)
+    mini = np.min(box_tmp.corners(), 1)
+
+    x_filt_max = new_PC.points[0, :] < maxi[0]
+    x_filt_min = new_PC.points[0, :] > mini[0]
+    y_filt_max = new_PC.points[1, :] < maxi[1]
+    y_filt_min = new_PC.points[1, :] > mini[1]
+    z_filt_max = new_PC.points[2, :] < maxi[2]
+    z_filt_min = new_PC.points[2, :] > mini[2]
+
+    close = np.logical_and(x_filt_min, x_filt_max)
+    close = np.logical_and(close, y_filt_min)
+    close = np.logical_and(close, y_filt_max)
+    close = np.logical_and(close, z_filt_min)
+    close = np.logical_and(close, z_filt_max)
+    return close
+
+
+
+'''
+written by Jimmy Wu
+Sep. 29
+'''
+def generate_random_points(velocity, scale, num_sample):
+       return (np.random.rand(3, num_sample)*2-1) * (velocity * scale)

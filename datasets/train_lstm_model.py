@@ -1,5 +1,5 @@
 import torch
-
+import numpy as np
 
 # class LSTM(torch.nn.Module):
 #
@@ -63,7 +63,7 @@ class LSTM(torch.nn.Module):
         predictions = self.linear(lstm_out.reshape(len(input_seq), -1))
         return predictions #[-1]
 
-seq_len = 5
+seq_len = 10
 
 X = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_train_x_'+str(seq_len)+'_normalize_pos.pt')
 Y = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_train_label_'+str(seq_len)+'_normalize_pos.pt')
@@ -85,7 +85,7 @@ valY = Y[train_size:].float().cuda()
 testX = test_X.float().cuda()
 testY = test_Y.float().cuda()
 
-num_epochs = 13000 #10000
+num_epochs = 8000 #10000 #10000
 learning_rate = 0.001
 
 input_size = 3
@@ -98,15 +98,25 @@ lstm = lstm.cuda()
 lstm.train()
 
 criterion = torch.nn.MSELoss()  # mean-squared error for regression
-optimizer = torch.optim.Adam(lstm.parameters(), lr=learning_rate)
+optimizer = torch.optim.Adam(lstm.parameters(), lr=learning_rate, weight_decay=1e-4)
 # optimizer_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5000, gamma=0.5)
 # optimizer = torch.optim.SGD(lstm.parameters(), lr=learning_rate)
+
+best_epoch = 0
+best_test_loss = 1000
 
 # Train the model
 for epoch in range(num_epochs):
     # optimizer_scheduler.step()
 
-    outputs = lstm(trainX)
+    # add noises to the input xyzs
+    # for i in range(trainX.size()[0]):
+    #     if np.random.rand() > 0.5:
+    #         trainX[i] +=
+
+    noise = torch.from_numpy(np.random.uniform(low=-0.5, high=0.5, size=trainX.size()[0]*trainX.size()[1]*3).reshape(trainX.size()[0], trainX.size()[1], 3)).cuda().float()
+    # noise[:, -1, :] = torch.zeros(noise[:, -1, :].size()[0], noise[:, -1, :].size()[1])
+    outputs = lstm(trainX+noise)
     optimizer.zero_grad()
 
     # obtain the loss function
@@ -123,7 +133,14 @@ for epoch in range(num_epochs):
         # testing
         test_predictions = lstm(testX)
         test_loss = criterion(test_predictions.unsqueeze(1), testY)
+        if test_loss.item() <= best_test_loss:
+            best_test_loss = test_loss.item()
+            best_epoch = epoch
+            torch.save(lstm.state_dict(), '/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_' + str(
+                seq_len) + '_hidden_' + str(hidden_size) + '_normalize_position_add_noise' +  '.pt')
+
         print("Epoch: %d, training loss: %1.5f val loss: %1.5f test loss: %1.5f" % (epoch, loss.item(), val_loss.item(), test_loss.item()))
 
         lstm = lstm.train()
-torch.save(lstm.state_dict(), '/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_'+str(seq_len)+'_normalize_position_'+str(epoch)+'.pt')
+print(best_epoch)
+
