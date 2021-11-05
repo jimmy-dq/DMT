@@ -7,11 +7,51 @@ import torch
 from torch import nn
 from models.backbone.pointnet import Pointnet_Backbone
 from models.head.xcorr import BoxAwareXCorr
+# from models.head.expl_rpn_sa import P2BVoteNetRPN
 from models.head.expl_rpn import P2BVoteNetRPN
 from models import base_model
 import torch.nn.functional as F
 from datasets import points_utils
 from pointnet2.utils import pytorch_utils as pt_utils
+import numpy as np
+from pyquaternion import Quaternion
+from datasets.data_classes import Box
+import copy
+
+
+
+class LSTM(torch.nn.Module):
+    def __init__(self, input_size=1, hidden_layer_size=100, output_size=1, num_layers=1, seq_len=10):
+        super().__init__()
+        self.hidden_layer_size = hidden_layer_size
+
+        self.lstm = torch.nn.LSTM(input_size, hidden_layer_size, batch_first=True)
+
+        self.linear = torch.nn.Linear(hidden_layer_size*seq_len, output_size)
+
+        self.num_layers = num_layers
+
+        # self.hidden_cell = (torch.zeros(1,1,self.hidden_layer_size),
+        #                     torch.zeros(1,1,self.hidden_layer_size))
+
+    def forward(self, input_seq):
+        h_0 = torch.zeros(
+            self.num_layers, input_seq.size(0), self.hidden_layer_size).cuda()
+
+        c_0 = torch.zeros(
+            self.num_layers, input_seq.size(0), self.hidden_layer_size).cuda()
+
+        # lstm_out, self.hidden_cell = self.lstm(input_seq, self.hidden_cell)
+        lstm_out, self.hidden_cell = self.lstm(input_seq, (h_0, c_0))
+        predictions = self.linear(lstm_out.reshape(len(input_seq), -1))
+        return predictions #[-1]
+
+
+lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3, seq_len=10)
+lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_10_hidden_50_normalize_position_add_noise_0.3_78.2_64.4.pt'))
+lstm = lstm.cuda()
+lstm.eval()
+print('loading the lstm model')
 
 
 class EXPL_BAT(base_model.BaseModel):
@@ -37,12 +77,12 @@ class EXPL_BAT(base_model.BaseModel):
                                  num_proposal=self.config.num_proposal,
                                  normalize_xyz=self.config.normalize_xyz)
 
-        # follow this vote net for prediction
-        self.explicit_vote_layer = (
-            pt_utils.Seq(3 + self.config.feature_channel)
-                .conv1d(self.config.feature_channel, bn=True)
-                .conv1d(self.config.feature_channel, bn=True)
-                .conv1d(self.config.feature_channel, activation=None))
+        # # follow this vote net for prediction
+        # self.explicit_vote_layer = (
+        #     pt_utils.Seq(3 + self.config.feature_channel)
+        #         .conv1d(self.config.feature_channel, bn=True)
+        #         .conv1d(self.config.feature_channel, bn=True)
+        #         .conv1d(self.config.feature_channel, activation=None))
 
 
     def prepare_input(self, template_pc, search_pc, template_box):
@@ -131,7 +171,7 @@ class EXPL_BAT(base_model.BaseModel):
     # "loss_verification": loss_verification
 
 
-    def forward(self, input_dict):
+    def forward(self, input_dict, search_bboxes = None):
         """
         :param input_dict:
         {
@@ -154,8 +194,31 @@ class EXPL_BAT(base_model.BaseModel):
 
         samples = input_dict['samples'] #training: batchx8x3
 
-        if template.shape[0]>1:
-            dist = input_dict['dist']
+
+        # if samples == None:
+        #     # in the testing stage
+        #     # print('we need to do some sampling here')
+        #     sampled_samples = torch.from_numpy(
+        #         self.sample_nearby_location(input_dict['previous_center'].unsqueeze(0).cpu().data.numpy(),
+        #                                     k_num=32)).cuda().unsqueeze(0)
+        #     search = torch.cat((search, sampled_samples.float()), dim=1).cuda()
+        # else:
+        #     sampled_samples = samples[:, 0:int(samples.size()[1] / 2), :].float()
+        #     search = torch.cat((search, sampled_samples), dim=1).cuda()
+        #     for i in range(sampled_samples.size()[0]):
+        #         if i == 0:
+        #             seg_label = torch.from_numpy(points_utils.get_in_box_mask_from_numpy(sampled_samples[i].cpu().data.numpy().T, search_bboxes[i]).astype(int)).cuda().unsqueeze(0)
+        #             sample_bc =  torch.from_numpy(points_utils.get_point_to_box_distance(sampled_samples[i].cpu().data.numpy(), search_bboxes[i])).cuda().unsqueeze(0)
+        #         else:
+        #             seg_label = torch.cat((seg_label,
+        #                                    torch.from_numpy(points_utils.get_in_box_mask_from_numpy(sampled_samples[i].cpu().data.numpy().T, search_bboxes[i]).astype(int)).cuda().unsqueeze(0)), dim=0)
+        #             sample_bc = torch.cat((sample_bc, torch.from_numpy(points_utils.get_point_to_box_distance(sampled_samples[i].cpu().data.numpy(), search_bboxes[i])).cuda().unsqueeze(0)), dim=0)
+        #     input_dict['seg_label'] = torch.cat((input_dict['seg_label'], seg_label.float()), dim=1)
+        #     input_dict['points2cc_dist_s'] = torch.cat((input_dict['points2cc_dist_s'], sample_bc.float()), dim=1)
+
+
+        # if template.shape[0]>1:
+        #     dist = input_dict['dist']
 
         # backbone
         # template_xyz: batchx64x3
@@ -215,6 +278,52 @@ class EXPL_BAT(base_model.BaseModel):
                       }
         return end_points
 
+    def sample_nearby_location(self, center, k_num=32):
+        # random sampling around the GT center
+
+        dis_thr = 0.15
+
+        pos_samples = np.zeros((k_num // 2, 3))
+        neg_samples = np.zeros((k_num // 2, 3))
+        count_pos = 0
+        count_neg = 0
+        # sample random offsets for pos positions
+        while count_pos < (k_num // 2):
+            # random_offsets = np.random.uniform(low = -max(np.max(abs(scale)), 1.0), high = max(np.max(abs(scale)), 1.0), size=3) # make sure our offsets are nor too small
+            random_offsets = np.random.uniform(low=-0.3, high=0.3, size=3)
+            dis = np.sqrt(np.sum(random_offsets ** 2))
+            if dis < dis_thr:
+                pos_samples[count_pos] = random_offsets + center[0]
+                count_pos += 1
+
+        while count_neg < (k_num // 2):
+            random_offsets = np.random.uniform(low=-0.3, high=0.3, size=3)
+            dis = np.sqrt(np.sum(random_offsets ** 2))
+            if dis > dis_thr:
+                neg_samples[count_neg] = random_offsets + center[0]
+                count_neg += 1
+        samples = np.concatenate((pos_samples, neg_samples),
+                                 axis=0)  # num//2 pos, num//2 neg, the last is the previous location
+        return samples
+
+    def get_new_position(self, tracklet_bbox, offset):
+        rot_quat = Quaternion(matrix=tracklet_bbox.rotation_matrix)
+        trans = np.array(tracklet_bbox.center)
+
+        new_box = copy.deepcopy(tracklet_bbox)
+
+        new_box.translate(-trans)
+        new_box.rotate(rot_quat.inverse)
+
+        new_box.rotate(
+            Quaternion(axis=[0, 0, 1], degrees=offset[2]))
+        new_box.translate(np.array([offset[0], offset[1], offset[2]]))
+        new_box.rotate(rot_quat)
+        new_box.translate(trans)
+        return new_box.center
+
+
+
     def training_step(self, batch, batch_idx):
         """
         {"estimation_boxes": estimation_boxs.transpose(1, 2).contiguous(),
@@ -226,8 +335,66 @@ class EXPL_BAT(base_model.BaseModel):
                   "pred_search_bc": pred_search_bc
         }
         """
+        lstm_input = batch['tracklet_xyz'][(batch['flag'] == 1).squeeze()]
+        lstm_prediction = lstm(lstm_input.float()).detach()
+        if (batch['flag'] == 0).sum() > 0:
+            constant_vel_input = batch['tracklet_xyz'][(batch['flag'] == 0).squeeze()]
+            constant_vel_input = constant_vel_input[:,0:2,:]
+            pre_location = constant_vel_input[:,0,:]
+            current_location = constant_vel_input[:,1,:]
+            cvm_prediction = current_location - pre_location + current_location
+            sampled_locations = torch.cat((lstm_prediction, cvm_prediction), dim=0)
+        else:
+            sampled_locations = lstm_prediction
 
-        end_points = self(batch)
+        # convert the xyz
+        converted_locations = []
+        search_bboxes = []
+        for j in range(sampled_locations.size()[0]):
+            center = batch['tracklet_ref_bbox_center'][j].cpu().data.numpy().tolist()
+            bbox_size = batch['tracklet_ref_wlh'][j].cpu().data.numpy().tolist()
+            orientation = Quaternion(
+                axis=[0, 0, -1], radians=batch['tracklet_ref_bbox_rotation_y'][j].item()) * Quaternion(axis=[0, 0, -1], degrees=90)
+            tracklet_bbox = Box(center, bbox_size, orientation)
+            # converted_center = self.get_new_position(tracklet_bbox, sampled_locations[j].cpu().data.numpy())
+
+            # points_utils.getOffsetBB(tracklet_bbox, estimation_box_cpu, degrees=self.config.degrees,
+            #                          use_z=self.config.use_z,
+            #                          limit_box=self.config.limit_box)
+
+            converted_bb = points_utils.getOffsetBB(tracklet_bbox, sampled_locations[j].cpu().data.numpy(), limit_box=False,
+                                                 degrees=True, use_z=True)
+            converted_center = converted_bb.center
+
+            search_center = batch['search_bbox_center'][j].cpu().data.numpy().tolist()
+            search_bbox_size = batch['search_bbox_wlh'][j].cpu().data.numpy().tolist()
+            search_orientation = Quaternion(
+                axis=[0, 0, -1], radians=batch['search_bbox_rotation_y'][j].item()) * Quaternion(axis=[0, 0, -1], degrees=90)
+            search_bbox = Box(search_center, search_bbox_size, search_orientation)
+            sample_bb = points_utils.getOffsetBB(search_bbox, batch['sample_offset'][j].cpu().data.numpy(), limit_box=False,
+                                                 degrees=True)
+            converted_location = points_utils.generate_single_pc(converted_center.reshape(3, 1), sample_bb).points.reshape(1, 3)
+            converted_locations.append(converted_location)
+            gt_location = np.array(batch['box_label'][j][0:3].cpu().data.numpy()).reshape(1, 3)
+            dis = np.mean((converted_location - gt_location)**2)
+            search_bboxes.append(points_utils.transform_box(search_bbox, sample_bb))
+        sampled_locations = torch.from_numpy(np.array(converted_locations)).squeeze().cuda()
+
+            # center = [anno["x"], anno["y"] - anno["height"] / 2, anno["z"]]
+            # size = [anno["width"], anno["length"], anno["height"]]
+            # orientation = Quaternion(
+            #     axis=[0, 1, 0], radians=anno["rotation_y"]) * Quaternion(
+            #     axis=[1, 0, 0], radians=np.pi / 2)
+            # bb = Box(center, size, orientation)
+
+        for i in range(sampled_locations.size()[0]): # loop for batch
+           if i == 0:
+                sampled_samples = torch.from_numpy(self.sample_nearby_location(sampled_locations[i].unsqueeze(0).cpu().data.numpy(), k_num=32)).cuda().unsqueeze(0)
+           else:
+                sampled_samples = torch.cat((sampled_samples, torch.from_numpy(self.sample_nearby_location(sampled_locations[i].unsqueeze(0).cpu().data.numpy(), k_num=32)).cuda().unsqueeze(0)), dim=0)
+
+        batch['samples'] = torch.cat((batch['samples'], sampled_samples), dim=1)
+        end_points = self(batch, search_bboxes=search_bboxes)
 
         search_pc = batch['points2cc_dist_s']
         estimation_cla = end_points['estimation_cla']  # B,N
@@ -245,6 +412,8 @@ class EXPL_BAT(base_model.BaseModel):
         loss =  loss_dict['loss_box'] * self.config.box_weight \
                + loss_dict['loss_seg'] * self.config.seg_weight \
                + loss_dict['loss_bc'] * self.config.bc_weight
+
+        #+ loss_dict['loss_verification'] * self.config.verification_weight
 
         #loss_dict['loss_objective'] * self.config.objectiveness_weight \
                # + \

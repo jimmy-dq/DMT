@@ -61,13 +61,13 @@ from sklearn.preprocessing import PolynomialFeatures
 
 
 class LSTM(torch.nn.Module):
-    def __init__(self, input_size=1, hidden_layer_size=100, output_size=1, num_layers=1):
+    def __init__(self, input_size=1, hidden_layer_size=100, output_size=1, num_layers=1, seq_len=10):
         super().__init__()
         self.hidden_layer_size = hidden_layer_size
 
         self.lstm = torch.nn.LSTM(input_size, hidden_layer_size, batch_first=True)
 
-        self.linear = torch.nn.Linear(hidden_layer_size*10, output_size)
+        self.linear = torch.nn.Linear(hidden_layer_size*seq_len, output_size)
 
         self.num_layers = num_layers
 
@@ -87,8 +87,16 @@ class LSTM(torch.nn.Module):
         return predictions #[-1]
 
 
-lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3)
-lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/car_model_normalize_position_7999.pt'))
+lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3, seq_len=10)
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_normalize_position_7999.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_10_hidden_50_normalize_position.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_10_hidden_50_normalize_position.pt'))
+lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_10_hidden_50_normalize_position_add_noise_0.3_78.2_64.4.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_20_normalize_position_7999.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_20_normalize_position_999.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_20_normalize_position_9999.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_5_normalize_position_7999.pt'))
+# lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_5_normalize_position_12999.pt'))
 lstm = lstm.cuda()
 lstm.eval()
 print('loading the lstm model')
@@ -298,14 +306,15 @@ class BaseModel(pl.LightningModule):
         :param sequence: a sequence of annos {"pc": pc, "3d_bbox": bb, 'meta': anno}
         :return:
         """
+
         ious = []
         distances = []
         results_bbs = []
         dist_gt = []
         gt_bbs = []
-        for frame_id in range(len(sequence)):
-            if frame_id > 0:
-                dist_gt.append(np.sqrt(np.sum((sequence[frame_id]["3d_bbox"].center - sequence[frame_id-1]["3d_bbox"].center)**2)))
+        # for frame_id in range(len(sequence)):
+            # if frame_id > 0:
+            #     dist_gt.append(np.sqrt(np.sum((sequence[frame_id]["3d_bbox"].center - sequence[frame_id-1]["3d_bbox"].center)**2)))
         for frame_id in range(len(sequence)):  # tracklet
             # print(frame_id)
             # if frame_id == 130:
@@ -344,7 +353,7 @@ class BaseModel(pl.LightningModule):
                     data_dict['previous_center'] = torch.from_numpy(previous_center).float().cuda() # 1x3
                     data_dict['samples'] = None
                 else:
-                    if frame_id < 10: # 10 is the seq_len for velocity, i.e., at least have (seq_len+1) frames, except for the current frame
+                    if frame_id < 10: #10: # 10 is the seq_len for velocity, i.e., at least have (seq_len+1) frames, except for the current frame
                         previous_center = points_utils.generate_single_pc(results_bbs[-1].center.reshape(3, 1), results_bbs[-1]) # 3x1
                         bef_previous_center = points_utils.generate_single_pc(results_bbs[-2].center.reshape(3, 1), results_bbs[-1]) # 3x1
                         velocity = previous_center.points - bef_previous_center.points
