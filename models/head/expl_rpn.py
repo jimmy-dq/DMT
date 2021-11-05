@@ -75,11 +75,11 @@ class P2BVoteNetRPN(nn.Module):
                 .conv1d(feature_channel, bn=True)
                 .conv1d(feature_channel, bn=True)
                 .conv1d(1, activation=None))
-        self.FC_layer_verification = (
-            pt_utils.Seq(feature_channel+feature_channel)
-                .conv1d(feature_channel, bn=True)
-                .conv1d(feature_channel, bn=True)
-                .conv1d(1, activation=None))
+        # self.FC_layer_verification = (
+        #     pt_utils.Seq(feature_channel+feature_channel)
+        #         .conv1d(feature_channel, bn=True)
+        #         .conv1d(feature_channel, bn=True)
+        #         .conv1d(1, activation=None))
         # self.vote_layer = (
         #     pt_utils.Seq(3 + feature_channel)
         #         .conv1d(feature_channel, bn=True)
@@ -107,8 +107,8 @@ class P2BVoteNetRPN(nn.Module):
                 .conv1d(feature_channel, bn=True)
                 .conv1d(3 + 1, activation=None))
 
-        self.eca = eca_layer()
-        self.sa_layer = SA_Layer(feature_channel)
+        # self.eca = eca_layer()
+        # self.sa_layer = SA_Layer(feature_channel)
 
     def forward(self, search_xyz, search_feature, previous_xyz, template_xyz, template_feature, samples = None):
         """
@@ -129,29 +129,29 @@ class P2BVoteNetRPN(nn.Module):
         # template_center_feature  = self.conv_final(voted_template_feature) # Nx256x1
 
         # we have multiple point proposals
-        # contrsuct one batch Nxfeat_dimx128
+        # construct one batch Nxfeat_dimx128
         if samples != None:
             n_samples_per_epoch = samples.size()[1]
             for i in range(n_samples_per_epoch):
-                offsets = search_xyz - samples[:,i,:].unsqueeze(1).repeat(1, search_xyz.size()[1], 1)
+                offsets = search_xyz - samples[:,i,:].float().unsqueeze(1).repeat(1, search_xyz.size()[1], 1)
                 offset_features = torch.cat((offsets.transpose(1, 2).contiguous(), search_feature), dim=1)
                 voted_feature = self.explicit_vote_layer(offset_features)
                 # attention
-                voted_feature = self.eca(voted_feature)
-                voted_feature = self.sa_layer(voted_feature)
+                # voted_feature = self.eca(voted_feature)
+                # voted_feature = self.sa_layer(voted_feature)
                 voted_feature = F.max_pool2d(voted_feature, kernel_size=[1, voted_feature.size()[-1]])
                 voted_feature = self.conv_final(voted_feature)
                 proposal_offsets = self.FC_proposal(voted_feature)
                 if i == 0:
                     # verification_scores = self.FC_layer_verification(torch.cat((voted_feature, template_center_feature), dim=1))
                     estimation_boxes = torch.cat(
-                        (proposal_offsets[:, 0:3, :] + samples[:,i,:].unsqueeze(1).transpose(1,2).contiguous(),
+                        (proposal_offsets[:, 0:3, :] + samples[:,i,:].float().unsqueeze(1).transpose(1,2).contiguous(),
                          proposal_offsets[:, 3:4, :]),
                         dim=1).transpose(1, 2).contiguous()
                 else:
                     # verification_scores = torch.cat((verification_scores, self.FC_layer_verification(torch.cat((voted_feature, template_center_feature), dim=1))), dim=0)
                     estimation_boxes = torch.cat((estimation_boxes, torch.cat(
-                        (proposal_offsets[:, 0:3, :] + samples[:,i,:].unsqueeze(1).transpose(1,2).contiguous(),
+                        (proposal_offsets[:, 0:3, :] + samples[:,i,:].float().unsqueeze(1).transpose(1,2).contiguous(),
                          proposal_offsets[:, 3:4, :]),
                         dim=1).transpose(1, 2).contiguous()), dim=0)
             # # we need to also include the previous center
@@ -159,8 +159,8 @@ class P2BVoteNetRPN(nn.Module):
             offset_features_previous = torch.cat((offsets_previous.transpose(1, 2).contiguous(), search_feature), dim=1)
             voted_feature_previous = self.explicit_vote_layer(offset_features_previous)
             # attention
-            voted_feature_previous = self.eca(voted_feature_previous)
-            voted_feature_previous = self.sa_layer(voted_feature_previous)
+            # voted_feature_previous = self.eca(voted_feature_previous)
+            # voted_feature_previous = self.sa_layer(voted_feature_previous)
             voted_feature_previous = F.max_pool2d(voted_feature_previous, kernel_size=[1, voted_feature_previous.size()[-1]])
             voted_feature_previous = self.conv_final(voted_feature_previous)
 
@@ -192,10 +192,9 @@ class P2BVoteNetRPN(nn.Module):
 
         voted_feature = self.explicit_vote_layer(offset_features)
         # attention
-        voted_feature = self.eca(voted_feature)
-        voted_feature = self.sa_layer(voted_feature)
+        # voted_feature = self.eca(voted_feature)
+        # voted_feature = self.sa_layer(voted_feature)
         voted_feature = F.max_pool2d(voted_feature, kernel_size=[1, voted_feature.size()[-1]])
-        # voted_feature = F.avg_pool2d(voted_feature, kernel_size=[1, voted_feature.size()[-1]])
         voted_feature = self.conv_final(voted_feature)
 
         proposal_offsets = self.FC_proposal(voted_feature)
