@@ -1,10 +1,9 @@
+import sys
+sys.path.append('../')
 import pickle
 import numpy as np
 import torch
 from datasets import points_utils
-
-
-
 
 def sliding_window(data, seq_length):   # data: N * 3
     x = []
@@ -24,11 +23,14 @@ def sliding_window(data, seq_length):   # data: N * 3
     return np.array(x), np.array(y) # x: N x seq_length x 3; y: N x 3;
 
 # for training tracklet generation
-# path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_train_velodyne_-1.dat'
+# path = '/home/xiayan/tracking/nuscenes/preload_nuscenes_Car_train_track_v1.0-trainval_10_-1.dat'
+# path = '/mnt/data/yan/tracking/training/preload_kitti_All_train_velodyne_-1.dat'
 # for testing tracklet generation
-path = '/home/visal/Data/Point_cloud_project/BAT/preload_kitti_Car_test_velodyne_-1.dat'
-seq_length = 5
-frame_window = 5
+# path = '/mnt/data/yan/tracking/training/preload_kitti_Car_test_velodyne_-1.dat'
+# path = '/mnt/data/yan/tracking/training/preload_kitti_All_test_velodyne_-1.dat'
+path = '/home/xiayan/tracking/nuscenes/preload_nuscenes_Car_val_v1.0-trainval_-1_1.dat'
+seq_length = 10
+frame_window = 10
 with open(path, 'rb') as f:
     training_seqs = pickle.load(f)
 count_seq = 0
@@ -51,11 +53,11 @@ for v_index in range(len(training_seqs)):
         count_seq += 1
 print(trainX.size())
 print(trainY.size())
-# torch.save(trainX, 'kitti_car_train_x_' + str(seq_length) + '_normalize_pos.pt')
-# torch.save(trainY, 'kitti_car_train_label_'+ str(seq_length) +'_normalize_pos.pt')
+# torch.save(trainX, 'nuscenes_car_train_x_' + str(seq_length) + '_normalize_pos.pt')
+# torch.save(trainY, 'nuscenes_car_train_label_'+ str(seq_length) +'_normalize_pos.pt')
 
 # for the testing data generation
-torch.save(trainX, 'kitti_car_test_x_' + str(seq_length) + '_normalize_pos.pt')
-torch.save(trainY, 'kitti_car_test_label_'+ str(seq_length) +'_normalize_pos.pt')
+torch.save(trainX, 'nuscenes_car_test_x_' + str(seq_length) + '_normalize_pos.pt')
+torch.save(trainY, 'nuscenes_car_test_label_'+ str(seq_length) +'_normalize_pos.pt')
 
 

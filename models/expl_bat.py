@@ -1,11 +1,8 @@
-""" 
-bat.py
-Created by zenn at 2021/7/21 14:16
-"""
-
 import torch
 from torch import nn
 from models.backbone.pointnet import Pointnet_Backbone
+from models.backbone.completion import PCN
+# from models.backbone.pointnet_transformer import PointTransformer
 from models.head.xcorr import BoxAwareXCorr
 # from models.head.expl_rpn_sa import P2BVoteNetRPN
 from models.head.expl_rpn import P2BVoteNetRPN
@@ -17,7 +14,349 @@ import numpy as np
 from pyquaternion import Quaternion
 from datasets.data_classes import Box
 import copy
+from typing import Optional, List
+from torch import Tensor
+from copy import deepcopy
+from extensions.chamfer_distance.chamfer_distance import ChamferDistance
 
+CD = ChamferDistance()
+
+def l2_cd(pcs1, pcs2):
+    dist1, dist2 = CD(pcs1, pcs2)
+    dist1 = torch.mean(dist1, dim=1)
+    dist2 = torch.mean(dist2, dim=1)
+    return torch.sum(dist1 + dist2)
+
+
+def l1_cd(pcs1, pcs2):
+    dist1, dist2 = CD(pcs1, pcs2)
+    dist1 = torch.mean(torch.sqrt(dist1), 1)
+    dist2 = torch.mean(torch.sqrt(dist2), 1)
+    return torch.sum(dist1 + dist2) / 2
+
+class MLP(nn.Module):
+    """ Very simple multi-layer perceptron (also called FFN)"""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+        
+class Transformer(nn.Module):
+
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 return_intermediate_dec=False):
+        super().__init__()
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+
+        # decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+        #                                         dropout, activation, normalize_before)
+        # decoder_norm = nn.LayerNorm(d_model)
+        # self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+        #                                   return_intermediate=return_intermediate_dec)
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.nhead = nhead
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, query_embed, pos_embed):
+        bs, n, c = src.shape
+        src = src.permute(1, 0, 2)
+        pos_embed = pos_embed.permute(1, 0, 2)
+        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        tgt = torch.zeros_like(query_embed)
+        memory = self.encoder(src, src_key_padding_mask=None, pos=pos_embed)
+        # hs = self.decoder(tgt, memory, memory_key_padding_mask=None,
+        #                   pos=pos_embed, query_pos=query_embed)
+        # return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, n)
+        return memory.permute(1, 2, 0).view(bs, c, n)
+
+class TransformerEncoder(nn.Module):
+
+    def __init__(self, encoder_layer, num_layers, norm=None):
+        super().__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, src,
+                mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None):
+        output = src
+
+        for layer in self.layers:
+            output = layer(output, src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask, pos=pos)
+
+        if self.norm is not None:
+            output = self.norm(output)
+
+        return output
+
+
+# class TransformerDecoder(nn.Module):
+
+#     def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
+#         super().__init__()
+#         self.layers = _get_clones(decoder_layer, num_layers)
+#         self.num_layers = num_layers
+#         self.norm = norm
+#         self.return_intermediate = return_intermediate
+
+#     def forward(self, tgt, memory,
+#                 tgt_mask: Optional[Tensor] = None,
+#                 memory_mask: Optional[Tensor] = None,
+#                 tgt_key_padding_mask: Optional[Tensor] = None,
+#                 memory_key_padding_mask: Optional[Tensor] = None,
+#                 pos: Optional[Tensor] = None,
+#                 query_pos: Optional[Tensor] = None):
+#         output = tgt
+
+#         intermediate = []
+
+#         for layer in self.layers:
+#             output = layer(output, memory, tgt_mask=tgt_mask,
+#                            memory_mask=memory_mask,
+#                            tgt_key_padding_mask=tgt_key_padding_mask,
+#                            memory_key_padding_mask=memory_key_padding_mask,
+#                            pos=pos, query_pos=query_pos)
+#             if self.return_intermediate:
+#                 intermediate.append(self.norm(output))
+
+#         if self.norm is not None:
+#             output = self.norm(output)
+#             if self.return_intermediate:
+#                 intermediate.pop()
+#                 intermediate.append(output)
+
+#         if self.return_intermediate:
+#             return torch.stack(intermediate)
+
+#         return output.unsqueeze(0)        
+
+class TransformerEncoderLayer(nn.Module):
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.activation = _get_activation_fn(activation)
+        self.normalize_before = normalize_before
+
+    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(self,
+                     src,
+                     src_mask: Optional[Tensor] = None,
+                     src_key_padding_mask: Optional[Tensor] = None,
+                     pos: Optional[Tensor] = None):
+        q = k = self.with_pos_embed(src, pos)
+        src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src
+
+    def forward_pre(self, src,
+                    src_mask: Optional[Tensor] = None,
+                    src_key_padding_mask: Optional[Tensor] = None,
+                    pos: Optional[Tensor] = None):
+        src2 = self.norm1(src)
+        q = k = self.with_pos_embed(src2, pos)
+        src2 = self.self_attn(q, k, value=src2, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src2 = self.norm2(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        src = src + self.dropout2(src2)
+        return src
+
+    def forward(self, src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None):
+        if self.normalize_before:
+            return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+
+def attention(query, key,  value):
+    dim = query.shape[1]
+    scores_1 = torch.einsum('bdhn,bdhm->bhnm', query, key) / dim**.5
+    scores_2 = torch.einsum('abcd, aced->abcd', key, scores_1)
+    prob = torch.nn.functional.softmax(scores_2, dim=-1)
+    output = torch.einsum('bnhm,bdhm->bdhn', prob, value)
+    return output, prob
+
+class MultiHeadedAttention(nn.Module):
+    """ Multi-head attention to increase model expressivitiy """
+    def __init__(self, num_heads: int, d_model: int):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.dim = d_model // num_heads
+        self.num_heads = num_heads
+        self.merge = nn.Conv1d(d_model, d_model, kernel_size=1)
+        self.proj = nn.ModuleList([deepcopy(self.merge) for _ in range(3)])
+        self.down_mlp = MLP(input_dim = self.dim, hidden_dim = 32, output_dim = 1, num_layers = 1)
+
+
+    def forward(self, query, key, value):
+        batch_dim = query.size(0)
+        # pdb.set_trace()
+        query, key, value = [l(x).view(batch_dim, self.dim, self.num_heads, -1)
+                             for l, x in zip(self.proj, (query, key, value))]
+        x, prob = attention(query, key, value)
+        x = self.down_mlp(x)
+        return x.contiguous().view(batch_dim, self.dim*self.num_heads, -1)
+
+
+# class TransformerDecoderLayer(nn.Module):
+
+#     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+#                  activation="relu", normalize_before=False):
+#         super().__init__()
+#         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+#         self.multihead_attn = MultiHeadedAttention(nhead, d_model)
+
+#         # Implementation of Feedforward model
+#         self.linear1 = nn.Linear(d_model, dim_feedforward)
+#         self.dropout = nn.Dropout(dropout)
+#         self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+#         self.norm1 = nn.LayerNorm(d_model)
+#         self.norm2 = nn.LayerNorm(d_model)
+#         self.norm3 = nn.LayerNorm(d_model)
+#         self.dropout1 = nn.Dropout(dropout)
+#         self.dropout2 = nn.Dropout(dropout)
+#         self.dropout3 = nn.Dropout(dropout)
+
+#         self.activation = _get_activation_fn(activation)
+#         self.normalize_before = normalize_before
+
+
+#     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+#         return tensor if pos is None else tensor + pos
+
+#     def forward_post(self, tgt, memory,
+#                      tgt_mask: Optional[Tensor] = None,
+#                      memory_mask: Optional[Tensor] = None,
+#                      tgt_key_padding_mask: Optional[Tensor] = None,
+#                      memory_key_padding_mask: Optional[Tensor] = None,
+#                      pos: Optional[Tensor] = None,
+#                      query_pos: Optional[Tensor] = None):
+
+#         q = k = self.with_pos_embed(tgt, query_pos)
+#         tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
+#                             key_padding_mask=tgt_key_padding_mask)[0]
+#         tgt = tgt + self.dropout1(tgt2)
+#         tgt = self.norm1(tgt)
+#         tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos).permute(1,2,0),
+#                                 key=self.with_pos_embed(memory, pos).permute(1,2,0),
+#                                 value=memory.permute(1,2,0))
+#         tgt2 = tgt2.permute(2,0,1)
+#         tgt = tgt + self.dropout2(tgt2)
+#         tgt = self.norm2(tgt)
+#         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+#         tgt = tgt + self.dropout3(tgt2)
+#         tgt = self.norm3(tgt)
+#         return tgt
+
+#     def forward_pre(self, tgt, memory,
+#                     tgt_mask: Optional[Tensor] = None,
+#                     memory_mask: Optional[Tensor] = None,
+#                     tgt_key_padding_mask: Optional[Tensor] = None,
+#                     memory_key_padding_mask: Optional[Tensor] = None,
+#                     pos: Optional[Tensor] = None,
+#                     query_pos: Optional[Tensor] = None):
+#         tgt2 = self.norm1(tgt)
+#         q = k = self.with_pos_embed(tgt2, query_pos)
+#         tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
+#                               key_padding_mask=tgt_key_padding_mask)[0]
+#         tgt = tgt + self.dropout1(tgt2)
+#         tgt2 = self.norm2(tgt)
+#         tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
+#                                    key=self.with_pos_embed(memory, pos),
+#                                    value=memory, attn_mask=memory_mask,
+#                                    key_padding_mask=memory_key_padding_mask)[0]
+#         tgt = tgt + self.dropout2(tgt2)
+#         tgt2 = self.norm3(tgt)
+#         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+#         tgt = tgt + self.dropout3(tgt2)
+#         return tgt
+
+#     def forward(self, tgt, memory,
+#                 tgt_mask: Optional[Tensor] = None,
+#                 memory_mask: Optional[Tensor] = None,
+#                 tgt_key_padding_mask: Optional[Tensor] = None,
+#                 memory_key_padding_mask: Optional[Tensor] = None,
+#                 pos: Optional[Tensor] = None,
+#                 query_pos: Optional[Tensor] = None):
+#         if self.normalize_before:
+#             return self.forward_pre(tgt, memory, tgt_mask, memory_mask,
+#                                     tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+#         return self.forward_post(tgt, memory, tgt_mask, memory_mask,
+#                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+def build_transformer():
+    return Transformer(
+        d_model=256,
+        dropout=0.1,
+        nhead=4,
+        dim_feedforward=512,
+        num_encoder_layers=3,
+        num_decoder_layers=1,
+        normalize_before=False,
+        return_intermediate_dec=True,
+    )
+
+
+def _get_activation_fn(activation):
+    """Return an activation function given a string"""
+    if activation == "relu":
+        return F.relu
+    if activation == "gelu":
+        return F.gelu
+    if activation == "glu":
+        return F.glu
+    raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
 
 
 class LSTM(torch.nn.Module):
@@ -47,12 +386,6 @@ class LSTM(torch.nn.Module):
         return predictions #[-1]
 
 
-lstm = LSTM(input_size=3, hidden_layer_size=50, output_size=3, seq_len=10)
-lstm.load_state_dict(torch.load('/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_10_hidden_50_normalize_position_add_noise_0.3_78.2_64.4.pt'))
-lstm = lstm.cuda()
-lstm.eval()
-print('loading the lstm model')
-
 
 class EXPL_BAT(base_model.BaseModel):
     def __init__(self, config=None, **kwargs):
@@ -76,14 +409,10 @@ class EXPL_BAT(base_model.BaseModel):
                                  vote_channel=self.config.vote_channel,
                                  num_proposal=self.config.num_proposal,
                                  normalize_xyz=self.config.normalize_xyz)
-
-        # # follow this vote net for prediction
-        # self.explicit_vote_layer = (
-        #     pt_utils.Seq(3 + self.config.feature_channel)
-        #         .conv1d(self.config.feature_channel, bn=True)
-        #         .conv1d(self.config.feature_channel, bn=True)
-        #         .conv1d(self.config.feature_channel, activation=None))
-
+        # self.query_embed = nn.Embedding(1, 256)
+        # self.transformer = build_transformer()
+        self.completion_fc = PCN()
+        # self.cd_loss = l1_cd().to(self.device)
 
     def prepare_input(self, template_pc, search_pc, template_box):
         template_points, idx_t = points_utils.regularize_pc(template_pc.points.T, self.config.template_size,
@@ -107,6 +436,9 @@ class EXPL_BAT(base_model.BaseModel):
         box_label = data['box_label']  # B,4
         estimation_cla = output['estimation_cla']  # B,N
         seg_label = data['seg_label']
+        estimate_completion_pc = output['estimate_completion_points'] 
+        # print ('estimate_completion_pc', estimate_completion_pc.size())
+        # print ('completion_points', data['completion_points'].size())
 
         loss_seg = F.binary_cross_entropy_with_logits(estimation_cla, seg_label)
 
@@ -123,55 +455,23 @@ class EXPL_BAT(base_model.BaseModel):
                 loss_box += F.smooth_l1_loss(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4],
                                             box_label[:, None, :4].expand_as(estimation_boxes[(i*batch_size):(i*batch_size+batch_size), :, :4]),
                                             reduction='none')
-            # if i < k_num -1:
-            #     if i < (k_num-1)//2:
-            #         loss_verification += F.binary_cross_entropy_with_logits(
-            #             output['verification_scores'].squeeze(-1)[(i * batch_size):(i * batch_size + batch_size), :],
-            #             torch.ones(batch_size, 1).cuda())
-            #     else:
-            #         loss_verification += F.binary_cross_entropy_with_logits(
-            #             output['verification_scores'].squeeze(-1)[(i * batch_size):(i * batch_size + batch_size), :],
-            #             torch.zeros(batch_size, 1).cuda())
-
-
 
         loss_box = torch.mean(loss_box.mean(2))
-        # loss_verification /= k_num
 
-        # dist = torch.sum((estimation_boxes[:, :, :3] - box_label[:, None, :3]) ** 2, dim=-1)
-
-        # dist = torch.sqrt(dist + 1e-6)  # B, K
-        # objectness_label = torch.zeros_like(dist, dtype=torch.float)
-        # objectness_label[dist < 0.2] = 1
-        # objectness_score = estimation_boxes[:, :, 4]  # B, K
-        # objectness_mask = torch.zeros_like(objectness_label, dtype=torch.float)
-        # objectness_mask[dist < 0.2] = 1
-        # objectness_mask[dist > 0.6] = 1
-        # loss_objective = F.binary_cross_entropy_with_logits(objectness_score, objectness_label,
-        #                                                     pos_weight=torch.tensor([2.0]).cuda())
-
-        # box-aware loss
-        # search_bc = data['previous_location_bc']
         search_bc = data['points2cc_dist_s']
         pred_search_bc = output['pred_search_bc']
         loss_bc = F.smooth_l1_loss(pred_search_bc, search_bc, reduction='none')
         loss_bc = torch.sum(loss_bc.mean(2) * seg_label) / (seg_label.sum() + 1e-6)
-        # loss_bc = F.smooth_l1_loss(pred_search_bc, search_bc, reduction='none')
-        # loss_bc = torch.mean(loss_bc.mean(2))
-        # "loss_objective": loss_objective,
+
+        loss_cd = l1_cd(estimate_completion_pc, data['completion_points'])
         return {
                 "loss_seg": loss_seg,
                 "loss_bc": loss_bc,
-                "loss_box": loss_box
+                "loss_box": loss_box,
+                'loss_cd': loss_cd
                }
-        #"loss_objective": loss_objective,
-    # ,
-    #                 "loss_verification": loss_verification
-    # ,
-    # "loss_verification": loss_verification
 
-
-    def forward(self, input_dict, search_bboxes = None):
+    def forward(self, input_dict):
         """
         :param input_dict:
         {
@@ -189,43 +489,24 @@ class EXPL_BAT(base_model.BaseModel):
         template = input_dict['template_points']        # batchx512x3
         search = input_dict['search_points']            # batchx1024x3
         template_bc = input_dict['points2cc_dist_t']    # batchx512x9
+        # completion_PC = input_dict['completion_points'] # batchx1024x3
         M = template.shape[1]
         N = search.shape[1]
 
         samples = input_dict['samples'] #training: batchx8x3
-
-
-        # if samples == None:
-        #     # in the testing stage
-        #     # print('we need to do some sampling here')
-        #     sampled_samples = torch.from_numpy(
-        #         self.sample_nearby_location(input_dict['previous_center'].unsqueeze(0).cpu().data.numpy(),
-        #                                     k_num=32)).cuda().unsqueeze(0)
-        #     search = torch.cat((search, sampled_samples.float()), dim=1).cuda()
-        # else:
-        #     sampled_samples = samples[:, 0:int(samples.size()[1] / 2), :].float()
-        #     search = torch.cat((search, sampled_samples), dim=1).cuda()
-        #     for i in range(sampled_samples.size()[0]):
-        #         if i == 0:
-        #             seg_label = torch.from_numpy(points_utils.get_in_box_mask_from_numpy(sampled_samples[i].cpu().data.numpy().T, search_bboxes[i]).astype(int)).cuda().unsqueeze(0)
-        #             sample_bc =  torch.from_numpy(points_utils.get_point_to_box_distance(sampled_samples[i].cpu().data.numpy(), search_bboxes[i])).cuda().unsqueeze(0)
-        #         else:
-        #             seg_label = torch.cat((seg_label,
-        #                                    torch.from_numpy(points_utils.get_in_box_mask_from_numpy(sampled_samples[i].cpu().data.numpy().T, search_bboxes[i]).astype(int)).cuda().unsqueeze(0)), dim=0)
-        #             sample_bc = torch.cat((sample_bc, torch.from_numpy(points_utils.get_point_to_box_distance(sampled_samples[i].cpu().data.numpy(), search_bboxes[i])).cuda().unsqueeze(0)), dim=0)
-        #     input_dict['seg_label'] = torch.cat((input_dict['seg_label'], seg_label.float()), dim=1)
-        #     input_dict['points2cc_dist_s'] = torch.cat((input_dict['points2cc_dist_s'], sample_bc.float()), dim=1)
-
-
-        # if template.shape[0]>1:
-        #     dist = input_dict['dist']
-
-        # backbone
-        # template_xyz: batchx64x3
-        # template_feature: batchx256x64
+    
         template_xyz, template_feature, sample_idxs_t = self.backbone(template, [M // 2, M // 4, M // 8])
+        # print ('template_xyz', template_xyz.size())
+        # print ('template_feature', template_feature.size())
+        # print ('sample_idxs_t', sample_idxs_t.size())
         search_xyz, search_feature, sample_idxs = self.backbone(search, [N // 2, N // 4, N // 8])
         template_feature = self.conv_final(template_feature) # batchxDxNum.
+
+        #completion network
+        estimate_completion_points = self.completion_fc(template_feature)
+        # print ('completion_points', completion_points.size())
+        # completion_points = completion_points.unsqueeze(-1)
+
         search_feature = self.conv_final(search_feature)
 
         # prepare bc
@@ -235,7 +516,7 @@ class EXPL_BAT(base_model.BaseModel):
         template_bc = template_bc.gather(dim=1, index=sample_idxs_t.repeat(1, 1, self.config.bc_channel).long())
         # box-aware xcorr
         fusion_feature = self.xcorr(template_feature, search_feature, template_xyz, search_xyz, template_bc,
-                                    pred_search_bc)
+                                    pred_search_bc) ### 1, 256, 128
         previous_xyz = input_dict['previous_center'].unsqueeze(1)  # Nx1x3
         if samples == None:
             estimation_boxes, estimation_cla = self.rpn(search_xyz, fusion_feature, previous_xyz, template_xyz, template_feature, samples=samples)
@@ -243,37 +524,11 @@ class EXPL_BAT(base_model.BaseModel):
             estimation_boxes, estimation_cla, verification_scores = self.rpn(search_xyz, fusion_feature, previous_xyz, template_xyz,
                                                         template_feature, samples=samples)
 
-
-        # '''
-        # written by Jimmy Wu
-        # Sep-19
-        # vote to a explicit position, previous location
-        # '''
-        # previous_xyz = input_dict['previous_center'].unsqueeze(1)               # Nx1x3
-        #
-        # offsets = search_xyz - previous_xyz.repeat(1, search_xyz.size()[1], 1)
-        # voted_feature = self.explicit_vote_layer(torch.cat([offsets.transpose(1, 2), search_feature], dim=1))
-        # voted_feature = F.max_pool2d(voted_feature, kernel_size=[1, voted_feature.size()[-1]])
-        # voted_feature = self.conv_final(voted_feature)
-        #
-        # # prepare bc
-        # # pred_search_bc = self.mlp_bc(torch.cat([search_xyz.transpose(1, 2), search_feature], dim=1))  # B, 9, N // 8
-        # pred_search_bc = self.mlp_bc(torch.cat([previous_xyz.transpose(1, 2), voted_feature], dim=1))  # B, 9, N // 8
-        # pred_search_bc = pred_search_bc.transpose(1, 2)
-        # sample_idxs_t = sample_idxs_t[:, :M // 8, None]
-        # template_bc = template_bc.gather(dim=1, index=sample_idxs_t.repeat(1, 1, self.config.bc_channel).long())
-        # # box-aware xcorr
-        # # fusion_feature = self.xcorr(template_feature, search_feature, template_xyz, search_xyz, template_bc,
-        # #                             pred_search_bc)
-        # fusion_feature = self.xcorr(template_feature, voted_feature, template_xyz, previous_xyz, template_bc,
-        #                             pred_search_bc)
-        # # proposal generation
-        # # estimation_boxes, estimation_cla, vote_xyz, center_xyzs = self.rpn(search_xyz, fusion_feature)
-        # estimation_boxes = self.rpn(previous_xyz, fusion_feature)
         end_points = {"estimation_boxes": estimation_boxes,
                       "pred_search_bc": pred_search_bc,
                       'estimation_cla': estimation_cla,
                       'sample_idxs': sample_idxs,
+                      'estimate_completion_points': estimate_completion_points,
                       'verification_scores': verification_scores if samples != None else None
                       }
         return end_points
@@ -283,28 +538,20 @@ class EXPL_BAT(base_model.BaseModel):
 
         dis_thr = 0.15
 
-        pos_samples = np.zeros((k_num // 2, 3))
+        # pos_samples = np.zeros((k_num // 2, 3))
+        pos_samples = np.zeros((k_num, 3))
         neg_samples = np.zeros((k_num // 2, 3))
         count_pos = 0
         count_neg = 0
         # sample random offsets for pos positions
-        while count_pos < (k_num // 2):
+        while count_pos < (k_num):
             # random_offsets = np.random.uniform(low = -max(np.max(abs(scale)), 1.0), high = max(np.max(abs(scale)), 1.0), size=3) # make sure our offsets are nor too small
             random_offsets = np.random.uniform(low=-0.3, high=0.3, size=3)
             dis = np.sqrt(np.sum(random_offsets ** 2))
             if dis < dis_thr:
                 pos_samples[count_pos] = random_offsets + center[0]
                 count_pos += 1
-
-        while count_neg < (k_num // 2):
-            random_offsets = np.random.uniform(low=-0.3, high=0.3, size=3)
-            dis = np.sqrt(np.sum(random_offsets ** 2))
-            if dis > dis_thr:
-                neg_samples[count_neg] = random_offsets + center[0]
-                count_neg += 1
-        samples = np.concatenate((pos_samples, neg_samples),
-                                 axis=0)  # num//2 pos, num//2 neg, the last is the previous location
-        return samples
+        return pos_samples
 
     def get_new_position(self, tracklet_bbox, offset):
         rot_quat = Quaternion(matrix=tracklet_bbox.rotation_matrix)
@@ -322,8 +569,6 @@ class EXPL_BAT(base_model.BaseModel):
         new_box.translate(trans)
         return new_box.center
 
-
-
     def training_step(self, batch, batch_idx):
         """
         {"estimation_boxes": estimation_boxs.transpose(1, 2).contiguous(),
@@ -335,66 +580,7 @@ class EXPL_BAT(base_model.BaseModel):
                   "pred_search_bc": pred_search_bc
         }
         """
-        lstm_input = batch['tracklet_xyz'][(batch['flag'] == 1).squeeze()]
-        lstm_prediction = lstm(lstm_input.float()).detach()
-        if (batch['flag'] == 0).sum() > 0:
-            constant_vel_input = batch['tracklet_xyz'][(batch['flag'] == 0).squeeze()]
-            constant_vel_input = constant_vel_input[:,0:2,:]
-            pre_location = constant_vel_input[:,0,:]
-            current_location = constant_vel_input[:,1,:]
-            cvm_prediction = current_location - pre_location + current_location
-            sampled_locations = torch.cat((lstm_prediction, cvm_prediction), dim=0)
-        else:
-            sampled_locations = lstm_prediction
-
-        # convert the xyz
-        converted_locations = []
-        search_bboxes = []
-        for j in range(sampled_locations.size()[0]):
-            center = batch['tracklet_ref_bbox_center'][j].cpu().data.numpy().tolist()
-            bbox_size = batch['tracklet_ref_wlh'][j].cpu().data.numpy().tolist()
-            orientation = Quaternion(
-                axis=[0, 0, -1], radians=batch['tracklet_ref_bbox_rotation_y'][j].item()) * Quaternion(axis=[0, 0, -1], degrees=90)
-            tracklet_bbox = Box(center, bbox_size, orientation)
-            # converted_center = self.get_new_position(tracklet_bbox, sampled_locations[j].cpu().data.numpy())
-
-            # points_utils.getOffsetBB(tracklet_bbox, estimation_box_cpu, degrees=self.config.degrees,
-            #                          use_z=self.config.use_z,
-            #                          limit_box=self.config.limit_box)
-
-            converted_bb = points_utils.getOffsetBB(tracklet_bbox, sampled_locations[j].cpu().data.numpy(), limit_box=False,
-                                                 degrees=True, use_z=True)
-            converted_center = converted_bb.center
-
-            search_center = batch['search_bbox_center'][j].cpu().data.numpy().tolist()
-            search_bbox_size = batch['search_bbox_wlh'][j].cpu().data.numpy().tolist()
-            search_orientation = Quaternion(
-                axis=[0, 0, -1], radians=batch['search_bbox_rotation_y'][j].item()) * Quaternion(axis=[0, 0, -1], degrees=90)
-            search_bbox = Box(search_center, search_bbox_size, search_orientation)
-            sample_bb = points_utils.getOffsetBB(search_bbox, batch['sample_offset'][j].cpu().data.numpy(), limit_box=False,
-                                                 degrees=True)
-            converted_location = points_utils.generate_single_pc(converted_center.reshape(3, 1), sample_bb).points.reshape(1, 3)
-            converted_locations.append(converted_location)
-            gt_location = np.array(batch['box_label'][j][0:3].cpu().data.numpy()).reshape(1, 3)
-            dis = np.mean((converted_location - gt_location)**2)
-            search_bboxes.append(points_utils.transform_box(search_bbox, sample_bb))
-        sampled_locations = torch.from_numpy(np.array(converted_locations)).squeeze().cuda()
-
-            # center = [anno["x"], anno["y"] - anno["height"] / 2, anno["z"]]
-            # size = [anno["width"], anno["length"], anno["height"]]
-            # orientation = Quaternion(
-            #     axis=[0, 1, 0], radians=anno["rotation_y"]) * Quaternion(
-            #     axis=[1, 0, 0], radians=np.pi / 2)
-            # bb = Box(center, size, orientation)
-
-        for i in range(sampled_locations.size()[0]): # loop for batch
-           if i == 0:
-                sampled_samples = torch.from_numpy(self.sample_nearby_location(sampled_locations[i].unsqueeze(0).cpu().data.numpy(), k_num=32)).cuda().unsqueeze(0)
-           else:
-                sampled_samples = torch.cat((sampled_samples, torch.from_numpy(self.sample_nearby_location(sampled_locations[i].unsqueeze(0).cpu().data.numpy(), k_num=32)).cuda().unsqueeze(0)), dim=0)
-
-        batch['samples'] = torch.cat((batch['samples'], sampled_samples), dim=1)
-        end_points = self(batch, search_bboxes=search_bboxes)
+        end_points = self(batch)
 
         search_pc = batch['points2cc_dist_s']
         estimation_cla = end_points['estimation_cla']  # B,N
@@ -406,20 +592,14 @@ class EXPL_BAT(base_model.BaseModel):
         # update label
         batch['seg_label'] = seg_label
         batch['points2cc_dist_s'] = search_pc
+
         # compute loss
         loss_dict = self.compute_loss(batch, end_points)
 
         loss =  loss_dict['loss_box'] * self.config.box_weight \
                + loss_dict['loss_seg'] * self.config.seg_weight \
-               + loss_dict['loss_bc'] * self.config.bc_weight
-
-        #+ loss_dict['loss_verification'] * self.config.verification_weight
-
-        #loss_dict['loss_objective'] * self.config.objectiveness_weight \
-               # + \
-        #                + loss_dict['loss_verification'] * self.config.verification_weight
-        # \
-        # + loss_dict['loss_verification'] * self.config.verification_weight
+               + loss_dict['loss_bc'] * self.config.bc_weight \
+               + loss_dict['loss_cd']
 
         # log
         self.log('loss/train', loss.item(), on_step=True, on_epoch=True, prog_bar=True, logger=False)
@@ -427,24 +607,15 @@ class EXPL_BAT(base_model.BaseModel):
                  logger=False)
         self.log('loss_seg/train', loss_dict['loss_seg'].item(), on_step=True, on_epoch=True, prog_bar=True,
                  logger=False)
-        # self.log('loss_ver/train', loss_dict['loss_verification'].item(), on_step=True, on_epoch=True, prog_bar=True,
-        #          logger=False)
-        # self.log('loss_vote/train', loss_dict['loss_vote'].item(), on_step=True, on_epoch=True, prog_bar=True,
-        #          logger=False)
         self.log('loss_bc/train', loss_dict['loss_bc'].item(), on_step=True, on_epoch=True, prog_bar=True,
                  logger=False)
-        # self.log('loss_objective/train', loss_dict['loss_objective'].item(), on_step=True, on_epoch=True, prog_bar=True,
-        #          logger=False)
-        # ,
-        # 'loss_ver': loss_dict['loss_verification'].item()
-
+        self.log('loss_bc/train', loss_dict['loss_cd'].item(), on_step=True, on_epoch=True, prog_bar=True,
+                 logger=False)
         self.logger.experiment.add_scalars('loss', {'loss_total': loss.item(),
                                                     'loss_box': loss_dict['loss_box'].item(),
                                                     'loss_bc': loss_dict['loss_bc'].item(),
-                                                    'loss_seg': loss_dict['loss_seg'].item()},
+                                                    'loss_seg': loss_dict['loss_seg'].item(),
+                                                    'loss_cd': loss_dict['loss_cd'].item()},
                                            global_step=self.global_step)
-        #      'loss_objective': loss_dict['loss_objective'].item()
-        # ,
-        #                                                     'loss_ver': loss_dict['loss_verification'].item()
 
         return loss

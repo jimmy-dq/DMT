@@ -65,11 +65,11 @@ class LSTM(torch.nn.Module):
 
 seq_len = 10
 
-X = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_train_x_'+str(seq_len)+'_normalize_pos.pt')
-Y = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_train_label_'+str(seq_len)+'_normalize_pos.pt')
+X = torch.load('/workspace/tracking/EXPL_BAT/datasets/nuscenes_car_train_x_'+str(seq_len)+'_normalize_pos.pt')
+Y = torch.load('/workspace/tracking/EXPL_BAT/datasets/nuscenes_car_train_label_'+str(seq_len)+'_normalize_pos.pt')
 
-test_X = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_test_x_'+str(seq_len)+'_normalize_pos.pt')
-test_Y = torch.load('/home/visal/Data/Point_cloud_project/BAT/datasets/kitti_car_test_label_'+str(seq_len)+'_normalize_pos.pt')
+test_X = torch.load('/workspace/tracking/EXPL_BAT/datasets/nuscenes_car_test_x_'+str(seq_len)+'_normalize_pos.pt')
+test_Y = torch.load('/workspace/tracking/EXPL_BAT/datasets/nuscenes_car_test_label_'+str(seq_len)+'_normalize_pos.pt')
 
 
 
@@ -136,7 +136,7 @@ for epoch in range(num_epochs):
         if test_loss.item() <= best_test_loss:
             best_test_loss = test_loss.item()
             best_epoch = epoch
-            torch.save(lstm.state_dict(), '/home/visal/Data/Point_cloud_project/BAT/lstm_models/car_model_len_' + str(
+            torch.save(lstm.state_dict(), '/workspace/tracking/EXPL_BAT/lstm_models/car_model_len_' + str(
                 seq_len) + '_hidden_' + str(hidden_size) + '_normalize_position_add_noise' +  '.pt')
 
         print("Epoch: %d, training loss: %1.5f val loss: %1.5f test loss: %1.5f" % (epoch, loss.item(), val_loss.item(), test_loss.item()))

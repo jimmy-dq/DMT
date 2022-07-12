@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torchmetrics.utilities.data
+from shapely import speedups
 from shapely.geometry import Polygon
 from torchmetrics import Metric
 
@@ -121,3 +122,5 @@ class TorchSuccess(Metric):
 
     def update(self, val):
         self.overlaps.append(val)
+
+speedups.disable()

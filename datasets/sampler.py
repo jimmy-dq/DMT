@@ -9,6 +9,42 @@ import datasets.points_utils as points_utils
 from datasets.searchspace import KalmanFiltering
 from easydict import EasyDict
 import copy
+from pyquaternion import Quaternion
+
+class SearchSpace(object):
+
+    def reset(self):
+        raise NotImplementedError
+
+    def sample(self):
+        raise NotImplementedError
+
+    def addData(self, data, score):
+        return
+
+class KalmanFiltering(SearchSpace):
+    def __init__(self, bnd=[1, 1, 10]):
+        self.bnd = bnd
+        self.reset()
+
+    def sample(self, n=10):
+        return np.random.multivariate_normal(self.mean, self.cov, size=n)
+
+    def addData(self, data, score):
+        score = score.clip(min=1e-5)  # prevent sum=0 in case of bad scores
+        self.data = np.concatenate((self.data, data))
+        self.score = np.concatenate((self.score, score))
+        self.mean = np.average(self.data, weights=self.score, axis=0)
+        self.cov = np.cov(self.data.T, ddof=0, aweights=self.score)
+
+    def reset(self):
+        self.mean = np.zeros(len(self.bnd))
+        self.cov = np.diag(self.bnd)
+        if len(self.bnd) == 2:
+            self.data = np.array([[], []]).T
+        else:
+            self.data = np.array([[], [], []]).T
+        self.score = np.array([])
 
 
 def no_processing(data, *args):
@@ -26,8 +62,10 @@ def siamese_processing(data, config):
     template_frame = data['template_frame']     # get the last frame (before the current frame) point clouds
     search_frame = data['search_frame']         # get the current frame point clouds
     candidate_id = data['candidate_id']         # when candidate_id ==0, there is no offsets
-    tracklet_frames = data['tracklet_frames']
-
+    # tracklet_frames = data['tracklet_frames']
+    anno_id = data['anno_id']
+    model_idx = data['model_idx']
+    model_PC = data['model_PC']
     # get specific data, note: they are in the same coordinate system
     first_pc, first_box = first_frame['pc'], first_frame['3d_bbox']
     template_pc, template_box = template_frame['pc'], template_frame['3d_bbox']
@@ -40,20 +78,19 @@ def siamese_processing(data, config):
         samplegt_offsets[2] = samplegt_offsets[2] * (5 if config.degrees else np.deg2rad(5))
     # generate the noisy template box in the previous frame
     template_box = points_utils.getOffsetBB(template_box, samplegt_offsets, limit_box=config.limit_box, degrees=config.degrees)
-
-
-
-
-
     # get the previous target center (in the global coordinate system)
     pl = copy.deepcopy(template_box.center)
     # generating template. Merging the object from previous and the first frames.
     model_pc, model_box = points_utils.getModel([first_pc, template_pc], [first_box, template_box],
                                                 scale=config.model_bb_scale, offset=config.model_bb_offset)
-    # first_model_pc, _ = points_utils.getModel([first_pc], [first_box],
-    #                                             scale=config.model_bb_scale, offset=config.model_bb_offset)
-
-
+    # print ('model_pc', model_pc.points.shape)
+    # np.save('/home/xiayan/model_pc.npy', model_pc.points)
+    completion_PC = points_utils.subsamplePC(model_PC[model_idx].points, 1024) 
+    gaussian = KalmanFiltering(bnd=[0.1, 0.1, 0.05, 0.5])
+    sample_offsets = gaussian.sample(1)[0]
+    rot = Quaternion(axis=[0, 0, 1], angle=-sample_offsets[3] * np.pi / 180)
+    completion_PC = np.dot(rot.rotation_matrix, completion_PC.t())
+    # completion_PC = torch.from_numpy(completion_PC).float()
     assert model_pc.nbr_points() > 20, 'not enough template points'
 
     # generating search area. Use the current gt box to select the nearby region as the search area.
@@ -70,25 +107,6 @@ def siamese_processing(data, config):
     previous_center = points_utils.generate_single_pc(pl.reshape(3, 1), sample_bb)
     previous_center = previous_center.points.transpose(1, 0)
 
-    # add some noises to the tracklet
-    tracklet_xyz = []
-    for i in range(len(tracklet_frames)):
-        tracklet_xyz.append(points_utils.generate_single_pc(tracklet_frames[i]['3d_bbox'].center.reshape(3, 1), tracklet_frames[-1]['3d_bbox']).points.squeeze())
-    tracklet_xyz = np.array(tracklet_xyz) # 10*3 or 2*3
-    if np.random.rand() > 0.5:
-        tracklet_xyz += np.random.uniform(low=-0.3, high=0.3, size=tracklet_xyz.shape[0] * 3).reshape(
-                tracklet_xyz.shape[0], 3)
-
-    # tracklet_xyz += np.random.uniform(low=-0.3, high=0.3, size=tracklet_xyz.shape[0] * 3).reshape(
-    #             tracklet_xyz.shape[0], 3)
-
-    # get the predicted location
-    # predicted_location = lstm(torch.from_numpy(np.array(tracklet_xyz)).unsqueeze(0))
-
-    # do the sampling for the predicted location
-
-    ################
-
 
     assert search_pc_crop.nbr_points() > 20, 'not enough search points'
     search_box = points_utils.transform_box(search_box, sample_bb)
@@ -102,63 +120,16 @@ def siamese_processing(data, config):
     # scale = (true_gt_center - previous_center) * 1.5 #1x3
 
     # random sampling around the GT center
-    k_num = 32 #8
-    dis_thr = 0.15
+    k_num = 64 #32 #8
+    count = 0
 
-    pos_samples = np.zeros((k_num//2, 3))
-    neg_samples = np.zeros((k_num//2, 3))
-    count_pos = 0
-    count_neg = 0
-    # sample random offsets for pos positions
-    while count_pos < (k_num//2):
+    samples = np.zeros((k_num, 3))
+    threshold = 0.75 #1.0
+    while count < (k_num):
         # random_offsets = np.random.uniform(low = -max(np.max(abs(scale)), 1.0), high = max(np.max(abs(scale)), 1.0), size=3) # make sure our offsets are nor too small
-        random_offsets = np.random.uniform(low = -0.15, high = 0.15, size=3)
-        dis = np.sqrt(np.sum(random_offsets**2))
-        if dis < dis_thr:
-            pos_samples[count_pos] = random_offsets + true_gt_center[0]
-            count_pos += 1
-
-    while count_neg < (k_num//2):
-        random_offsets = np.random.uniform(low=-1.0, high=1.0, size=3)
-        dis = np.sqrt(np.sum(random_offsets ** 2))
-        if dis > dis_thr:
-            neg_samples[count_neg] = random_offsets + true_gt_center[0]
-            count_neg += 1
-    samples = np.concatenate((pos_samples, neg_samples), axis=0) # num//2 pos, num//2 neg, the last is the previous location
-
-
-    # # random sampling based on the velocity
-    # samples_v = np.zeros((k_num, 3))
-    # velocity = true_gt_center - previous_center
-    # count_sample = 0
-    # scale = 1.5
-    # while count_sample < k_num:
-    #           for i in range(3):
-    #               if velocity[0][i] == 0:
-    #                   samples_v[count_sample][i] = true_gt_center[0][i]
-    #               elif velocity[0][i] > 0:
-    #                   samples_v[count_sample][i] = true_gt_center[0][i] + np.random.uniform(low=0, high=velocity[0][i]*scale, size=1)[0]
-    #               elif velocity[0][i] < 0:
-    #                   samples_v[count_sample][i] = true_gt_center[0][i] + np.random.uniform(low=velocity[0][i] * scale,
-    #                                                                                         high=0,
-    #                                                                                         size=1)[0]
-    #           count_sample += 1
-    # samples = np.concatenate((samples, samples_v), axis=0)
-    if tracklet_xyz.shape[0] == 2:  # constant velocity model
-        flag = 0
-        tracklet_xyz_temp = np.zeros((10, 3))
-        tracklet_xyz_temp[0:2] = tracklet_xyz
-        tracklet_xyz = tracklet_xyz_temp
-
-    else:
-        flag = 1
-
-    # center = [anno["x"], anno["y"] - anno["height"] / 2, anno["z"]]
-    # size = [anno["width"], anno["length"], anno["height"]]
-    # orientation = Quaternion(
-    #     axis=[0, 1, 0], radians=anno["rotation_y"]) * Quaternion(
-    #     axis=[1, 0, 0], radians=np.pi / 2)
-    # bb = Box(center, size, orientation)
+        random_offsets = np.random.uniform(low = -threshold, high = threshold, size=3)
+        samples[count] = random_offsets + true_gt_center[0]
+        count += 1
 
     template_points, idx_t = points_utils.regularize_pc(model_pc.points.T, config.template_size)
     search_points, idx_s = points_utils.regularize_pc(search_pc_crop.points.T, config.search_size)
@@ -171,18 +142,22 @@ def siamese_processing(data, config):
         'seg_label': seg_label.astype('float32'),
         'dist': dist.astype('float32'),
         'samples': samples.astype('float32'),
-        'tracklet_xyz': tracklet_xyz.astype('float32'),
-        'flag': np.array([flag]).astype('float32'),
-        'tracklet_ref_bbox_rotation_y': tracklet_frames[-1]['meta']['rotation_y'],
-        'tracklet_ref_bbox_center': tracklet_frames[-1]['3d_bbox'].center,
-        'tracklet_ref_wlh': tracklet_frames[-1]['3d_bbox'].wlh,
-        'search_bbox_rotation_y': search_frame['meta']['rotation_y'],
-        'search_bbox_center': search_frame['3d_bbox'].center,
-        'search_bbox_wlh': search_frame['3d_bbox'].wlh,
-        'sample_offset': sample_offset
-        # 'sample_bb': [sample_bb],
-        # 'last_position': [tracklet_frames[-1]['3d_bbox']]
+        'completion_points': completion_PC.T.astype('float32')
     }
+
+    #     'tracklet_xyz': tracklet_xyz.astype('float32'),
+    #     'flag': np.array([flag]).astype('float32'),
+    #     'tracklet_ref_bbox_rotation_y': tracklet_frames[-1]['meta']['rotation_y'],
+    #     'tracklet_ref_bbox_center': tracklet_frames[-1]['3d_bbox'].center,
+    #     'tracklet_ref_wlh': tracklet_frames[-1]['3d_bbox'].wlh,
+    #     'search_bbox_rotation_y': search_frame['meta']['rotation_y'],
+    #     'search_bbox_center': search_frame['3d_bbox'].center,
+    #     'search_bbox_wlh': search_frame['3d_bbox'].wlh,
+    #     'sample_offset': sample_offset,
+    #     'lstm_gt': lstm_gt
+    #     # 'sample_bb': [sample_bb],
+    #     # 'last_position': [tracklet_frames[-1]['3d_bbox']]
+    # }
 
     if getattr(config, 'box_aware', False):
         template_bc = points_utils.get_point_to_box_distance(template_points, model_box)
@@ -228,6 +203,7 @@ class PointTrackingSampler(torch.utils.data.Dataset):
     def __getitem__(self, index):
         anno_id = self.get_anno_index(index)
         candidate_id = self.get_candidate_index(index)
+        model_PC = self.dataset.model_PC
         try:
             if self.random_sample:
                 tracklet_id = torch.randint(0, self.dataset.get_num_tracklets(), size=(1,)).item()
@@ -240,21 +216,26 @@ class PointTrackingSampler(torch.utils.data.Dataset):
                         this_frame_id = anno_id - self.tracklet_start_ids[i]
                         prev_frame_id = max(this_frame_id - 1, 0)
                         frame_ids = (0, prev_frame_id, this_frame_id)
+                        this_anno = self.dataset.tracklet_anno_list[tracklet_id]
+                        model_idx = tracklet_id
             first_frame, template_frame, search_frame = self.dataset.get_frames(tracklet_id, frame_ids=frame_ids)
-            if prev_frame_id >= (self.config.tracklet_len-1): # have enough previous frames
-                sampled_frames = tuple([sampled_id for sampled_id in range(prev_frame_id-self.config.tracklet_len+1, prev_frame_id+1)])
-            else: # may not have enough previous frames for lstm prediction, change to the constant velocity model
-                if prev_frame_id == 0:
-                    sampled_frames = (0, 0)
-                else:
-                    sampled_frames = (prev_frame_id - 1, prev_frame_id)
-            tracklet_frames = self.dataset.get_frames(tracklet_id, frame_ids=sampled_frames)
+            # if prev_frame_id >= (self.config.tracklet_len-1): # have enough previous frames
+            #     sampled_frames = tuple([sampled_id for sampled_id in range(prev_frame_id-self.config.tracklet_len+1, prev_frame_id+1)])
+            # else: # may not have enough previous frames for lstm prediction, change to the constant velocity model
+            #     if prev_frame_id == 0:
+            #         sampled_frames = (0, 0)
+            #     else:
+            #         sampled_frames = (prev_frame_id - 1, prev_frame_id)
+            # tracklet_frames = self.dataset.get_frames(tracklet_id, frame_ids=sampled_frames)
 
             data = {"first_frame": first_frame,
                     "template_frame": template_frame,
                     "search_frame": search_frame,
                     "candidate_id": candidate_id,
-                    "tracklet_frames": tracklet_frames}
+                    "anno_id": anno_id,
+                    'model_idx': model_idx,
+                    'model_PC': model_PC}
+            # "tracklet_frames": tracklet_frames
 
             return self.processing(data, self.config)
         except AssertionError:

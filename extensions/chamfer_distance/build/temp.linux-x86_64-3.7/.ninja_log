@@ -1,0 +1,3 @@
+# ninja log v5
+0	11239	1657650455023596560	/workspace/tracking/EXPL_BAT_car_kitti_transformer/extensions/chamfer_distance/build/temp.linux-x86_64-3.7/chamfer3D.o	36311d79d59b0fea
+0	18004	1657650461791581104	/workspace/tracking/EXPL_BAT_car_kitti_transformer/extensions/chamfer_distance/build/temp.linux-x86_64-3.7/chamfer_cuda.o	812699517ed10a1f

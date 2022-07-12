@@ -13,6 +13,7 @@ import warnings
 import pickle
 from collections import defaultdict
 from datasets import points_utils
+from tqdm import tqdm
 
 
 class kittiDataset():
@@ -31,6 +32,29 @@ class kittiDataset():
         self.coordinate_mode = kwargs.get('coordinate_mode', 'velodyne')
         self.preload_offset = kwargs.get('preload_offset', -1)
         self.training_samples = self._load_data() # ? differences with tracklet_anno_list
+        self.preload_data_path = '/home/xiayan/'
+        if os.path.exists(self.preload_data_path + '_Models.pth'):
+            self.model_PC = self.load_data(self.preload_data_path + '_Models.pth')
+            # completion_PC = self.model_PC[1].points
+            # np.save('/home/xiayan/completion_PC.npy', completion_PC)
+        else:
+            self.model_PC = [None] * len(self.tracklet_anno_list)
+            # print (len(self.tracklet_anno_list))
+            for i in tqdm(range(len(self.tracklet_anno_list)), ncols=150, \
+                            ascii=True, desc="Create_model_pc"):
+                    list_of_anno = self.tracklet_anno_list[i]
+                    PCs = []
+                    BBs = []
+                    # cnt = 0
+                    for anno in list_of_anno:
+                        this_PC, this_BB = self._getBBandPC(anno)
+                        PCs.append(this_PC)
+                        BBs.append(this_BB)
+                        # anno["model_idx"] = i
+                        # anno["relative_idx"] = cnt
+                        # cnt += 1
+                    self.model_PC[i] = points_utils.getModel_completion(PCs, BBs, offset=0, scale=1.25)
+            self.save_data(self.preload_data_path + '_Models.pth', self.model_PC)
 
     @staticmethod
     def _build_scene_list(split):
@@ -87,6 +111,17 @@ class kittiDataset():
 
     def get_num_frames_tracklet(self, tracklet_id):
         return self.tracklet_len_list[tracklet_id]
+
+    def save_data(self, path, data):
+        file = open(path, "wb")
+        pickle.dump(data, file)
+        file.close()
+
+    def load_data(self, path):
+        file = open(path, "rb")
+        data = pickle.load(file)
+        file.close()
+        return data
 
     def _build_tracklet_anno(self):
 
@@ -182,6 +217,60 @@ class kittiDataset():
             pc = PointCloud(np.array([[0, 0, 0]]).T)
         # todo add image
         return {"pc": pc, "3d_bbox": bb, 'meta': anno}
+
+    def _getBBandPC(self, anno):
+        scene_id = anno['scene']
+        frame_id = anno['frame']
+        try:
+            calib = self.calibs[scene_id]
+        except KeyError:
+            calib_path = os.path.join(self.KITTI_calib, scene_id + ".txt")
+            calib = self._read_calib_file(calib_path)
+            self.calibs[scene_id] = calib
+        velo_to_cam = np.vstack((calib["Tr_velo_cam"], np.array([0, 0, 0, 1])))
+
+        if self.coordinate_mode == 'velodyne':
+            box_center_cam = np.array([anno["x"], anno["y"] - anno["height"] / 2, anno["z"], 1])
+            # transform bb from camera coordinate into velo coordinates
+            box_center_velo = np.dot(np.linalg.inv(velo_to_cam), box_center_cam)
+            box_center_velo = box_center_velo[:3]
+            size = [anno["width"], anno["length"], anno["height"]]
+            orientation = Quaternion(
+                axis=[0, 0, -1], radians=anno["rotation_y"]) * Quaternion(axis=[0, 0, -1], degrees=90)
+            bb = Box(box_center_velo, size, orientation)
+        else:
+            center = [anno["x"], anno["y"] - anno["height"] / 2, anno["z"]]
+            size = [anno["width"], anno["length"], anno["height"]]
+            orientation = Quaternion(
+                axis=[0, 1, 0], radians=anno["rotation_y"]) * Quaternion(
+                axis=[1, 0, 0], radians=np.pi / 2)
+            bb = Box(center, size, orientation)
+
+        try:
+            try:
+                pc = self.velos[scene_id][frame_id]
+            except KeyError:
+                # VELODYNE PointCloud
+                velodyne_path = os.path.join(self.KITTI_velo, scene_id,
+                                             '{:06}.bin'.format(frame_id))
+
+                pc = PointCloud(
+                    np.fromfile(velodyne_path, dtype=np.float32).reshape(-1, 4).T)
+                if self.coordinate_mode == "camera":
+                    pc.transform(velo_to_cam)
+                self.velos[scene_id][frame_id] = pc
+            if self.preload_offset > 0:
+                pc = points_utils.crop_pc_axis_aligned(pc, bb, offset=self.preload_offset)
+        except:
+            # in case the Point cloud is missing
+            # (0001/[000177-000180].bin)
+            # msg = f"The point cloud at scene {scene_id} frame {frame_id} is missing."
+            # warnings.warn(msg)
+            pc = PointCloud(np.array([[0, 0, 0]]).T)
+        # todo add image
+        return pc, bb
+
+
 
     @staticmethod
     def _read_calib_file(filepath):

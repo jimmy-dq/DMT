@@ -1,6 +1,6 @@
 #data
 dataset: kitti
-path: /home/visal/Data/Point_cloud_project/BAT #put the root of the dataset here
+path: /home/xiayan/tracking/data/training #put the root of the dataset here
 category_name: Car # [Car, Van, Pedestrian, Cyclist, All]
 search_bb_scale: 1.25
 search_bb_offset: 2
@@ -15,6 +15,7 @@ box_aware: True
 num_candidates: 4
 coordinate_mode: velodyne
 up_axis: [0,0,1]
+preload_offset: 10
 
 #model configuration
 net_model: EXPL_BAT

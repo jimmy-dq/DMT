@@ -347,3 +347,41 @@ Sep. 29
 '''
 def generate_random_points(velocity, scale, num_sample):
        return (np.random.rand(3, num_sample)*2-1) * (velocity * scale)
+
+'''
+written by Yan
+July. 10
+'''
+def getModel_completion(PCs, boxes, offset=0, scale=1.0, normalize=False):
+    
+    if len(PCs) == 0:
+        return PointCloud(np.ones((3, 0)))
+    points = np.ones((PCs[0].points.shape[0], 0))
+
+    for PC, box in zip(PCs, boxes):
+        cropped_PC, _ = cropAndCenterPC(
+            PC, box, offset=offset, scale=scale, normalize=normalize)
+        # try:
+        if cropped_PC.points.shape[1] > 0:
+            points = np.concatenate([points, cropped_PC.points], axis=1)
+
+    PC = PointCloud(points)
+
+    return PC
+
+def subsamplePC(PC, subsample_number):
+
+    if subsample_number == 0:
+        pass
+    elif PC.shape[1] > 2:
+        if PC.shape[0] > 3:
+            PC = PC[0:3, :]
+        if PC.shape[1] != subsample_number:
+            # subsample
+            new_pts_idx = np.random.randint(low=0, high=PC.shape[1], size=subsample_number, dtype=np.int64)
+            PC = PC[:, new_pts_idx]
+        PC = PC.reshape(3, subsample_number)
+    else:
+        PC = np.zeros((3, subsample_number))
+    
+    return torch.from_numpy(PC).float().t() #(N, 3)
