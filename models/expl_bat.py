@@ -17,22 +17,23 @@ import copy
 from typing import Optional, List
 from torch import Tensor
 from copy import deepcopy
-from extensions.chamfer_distance.chamfer_distance import ChamferDistance
+# from extensions.chamfer_distance.chamfer_distance import ChamferDistance
+from chamfer_distance import ChamferDistance
+chamfer_dist = ChamferDistance()
+# CD = ChamferDistance()
 
-CD = ChamferDistance()
-
-def l2_cd(pcs1, pcs2):
-    dist1, dist2 = CD(pcs1, pcs2)
-    dist1 = torch.mean(dist1, dim=1)
-    dist2 = torch.mean(dist2, dim=1)
-    return torch.sum(dist1 + dist2)
+# def l2_cd(pcs1, pcs2):
+#     dist1, dist2 = CD(pcs1, pcs2)
+#     dist1 = torch.mean(dist1, dim=1)
+#     dist2 = torch.mean(dist2, dim=1)
+#     return torch.sum(dist1 + dist2)
 
 
-def l1_cd(pcs1, pcs2):
-    dist1, dist2 = CD(pcs1, pcs2)
-    dist1 = torch.mean(torch.sqrt(dist1), 1)
-    dist2 = torch.mean(torch.sqrt(dist2), 1)
-    return torch.sum(dist1 + dist2) / 2
+# def l1_cd(pcs1, pcs2):
+#     dist1, dist2 = CD(pcs1, pcs2)
+#     dist1 = torch.mean(torch.sqrt(dist1), 1)
+#     dist2 = torch.mean(torch.sqrt(dist2), 1)
+#     return torch.sum(dist1 + dist2) / 2
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
@@ -463,7 +464,9 @@ class EXPL_BAT(base_model.BaseModel):
         loss_bc = F.smooth_l1_loss(pred_search_bc, search_bc, reduction='none')
         loss_bc = torch.sum(loss_bc.mean(2) * seg_label) / (seg_label.sum() + 1e-6)
 
-        loss_cd = l1_cd(estimate_completion_pc, data['completion_points'])
+        dist1, dist2 = chamfer_dist(estimate_completion_pc,  data['completion_points'])
+        loss_cd = (torch.mean(dist1)) + (torch.mean(dist2))
+        # loss_cd = l1_cd(estimate_completion_pc, data['completion_points'])
         return {
                 "loss_seg": loss_seg,
                 "loss_bc": loss_bc,
