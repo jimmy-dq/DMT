@@ -55,26 +55,7 @@ By default, the trainer runs a full evaluation on the full test split after trai
 To test a trained model, specify the checkpoint location with `--checkpoint` argument and send the `--test` flag to the command.
 ```bash
 python main.py --gpu 0 1 --cfg cfgs/BAT_Car.yaml  --checkpoint /path/to/checkpoint/xxx.ckpt --test
-```
 
-### Reproduction
-This codebase produces better results than those we report in our original paper.
-| Model | Category | Success| Precision| Checkpoint
-|--|--|--|--|--|
-| BAT | Car	|65.37 | 78.88|pretrained_models/bat_kitti_car.ckpt
-| BAT | Pedestrian | 45.74| 74.53| pretrained_models/bat_kitti_pedestrian.ckpt
-
-Two Trained BAT models for KITTI dataset are provided in the  [*pretrained_models*](./pretrained_models) directory. To reproduce the results, simply run the code with the corresponding `.yaml` file and checkpoint. For example, to reproduce the tracking results on Car, just run:
-```bash
-python main.py --gpu 0 1 --cfg cfgs/BAT_Car.yaml  --checkpoint ./pretrained_models/bat_kitti_car.ckpt --test
-```
-
-### To-dos
-- [x] DDP support
-- [x] Multi-gpus testing
-- [ ] Add NuScenes dataset
-- [ ] Add codes for visualization
-- [ ] Add support for more methods
 
 ### Acknowledgment
 + This repo is built upon [P2B](https://github.com/HaozheQi/P2B) and [SC3D](https://github.com/SilvioGiancola/ShapeCompletion3DTracking).
@@ -82,4 +63,4 @@ python main.py --gpu 0 1 --cfg cfgs/BAT_Car.yaml  --checkpoint ./pretrained_mode
 
 ### License
 This repository is released under MIT License (see LICENSE file for details).
-# EXPL_Tracking
+# DMT_Tracking
