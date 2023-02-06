@@ -1,30 +1,17 @@
-# Box-Aware Tracker (BAT)
-Pytorch-Lightning implementation of the Box-Aware Tracker.  
+# A Lightweight and Detector-free 3D Single Object Tracker on Point Clouds (DMT)
+Pytorch-Lightning implementation of DMT.  
 
-[Box-Aware Feature Enhancement for Single Object Tracking on Point Clouds](https://arxiv.org/pdf/2108.04728.pdf). **ICCV 2021** 
+[A Lightweight and Detector-free 3D Single Object Tracker on Point Clouds](https://arxiv.org/pdf/2203.04232.pdf). **IEEE Transactions on Intelligent Transportation Systems 2023** 
 
-[Chaoda Zheng](https://github.com/Ghostish/), [Xu Yan](https://yanx27.github.io/), Jiaotao Gao, Weibing Zhao, Wei Zhang, [Zhen Li*](https://mypage.cuhk.edu.cn/academics/lizhen/), Shuguang Cui
-
-### Citation
-```bibtex
-@InProceedings{zheng2021box,
-  title={Box-Aware Feature Enhancement for Single Object Tracking on Point Clouds},
-  author={Chaoda Zheng, Xu Yan, Jiaotao Gao, Weibing Zhao, Wei Zhang, Zhen Li, Shuguang Cui},
-  journal={ICCV},
-  year={2021}
-}
-```
-<img src="figures/results.gif" width="1000"/>
 
 ### Features
 + Modular design. It is easy to config the model and trainng/testing behaviors through just a `.yaml` file.
 + DDP support for both training and testing.
-+ Provide a 3rd party implementation of [P2B](https://github.com/HaozheQi/P2B).
 ### Setup
 Installation
 + Create the environment
   ```
-  git clone https://github.com/Ghostish/BAT.git
+  git clone https://github.com/jimmy-dq/EXPL_BAT.git
   cd BAT
   conda create -n bat  python=3.6
   conda activate bat
