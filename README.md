@@ -1,7 +1,9 @@
 # A Lightweight and Detector-free 3D Single Object Tracker on Point Clouds (DMT)
 Pytorch-Lightning implementation of DMT.  
 
-[A Lightweight and Detector-free 3D Single Object Tracker on Point Clouds](https://arxiv.org/pdf/2203.04232.pdf). **IEEE Transactions on Intelligent Transportation Systems 2023** 
+[A Lightweight and Detector-free 3D Single Object Tracker on Point Clouds](https://arxiv.org/pdf/2203.04232.pdf). 
+
+**IEEE Transactions on Intelligent Transportation Systems 2023** 
 
 
 ### Features
